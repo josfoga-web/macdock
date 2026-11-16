@@ -161,3 +161,201 @@ namespace MacDock
         }
     }
 }
+
+namespace MacDock
+{
+    // Efecto "genio" de macOS al minimizar: la ventana se curva, se estrecha y entra al icono de su app en el dock.
+    // Al restaurarla desde el dock sale del icono con la animacion inversa.
+    static class Genie
+    {
+        [System.Runtime.InteropServices.DllImport("user32.dll")] static extern bool PrintWindow(IntPtr h, IntPtr hdc, uint flags);
+        [System.Runtime.InteropServices.DllImport("dwmapi.dll")] static extern int DwmGetWindowAttribute(IntPtr h, int attr, out N.RECT r, int size);
+        [System.Runtime.InteropServices.StructLayout(System.Runtime.InteropServices.LayoutKind.Sequential)] struct ANIMATIONINFO { public int cbSize, iMinAnimate; }
+        [System.Runtime.InteropServices.DllImport("user32.dll", EntryPoint = "SystemParametersInfo")] static extern bool SpiAnim(int a, int u, ref ANIMATIONINFO p, int f);
+
+        public static bool Enabled = true;
+        public static Func<IntPtr, Rectangle> TargetFor;   // lo conecta el dock: rectangulo del icono de la app en pantalla
+        static readonly Dictionary<IntPtr, KeyValuePair<Bitmap, Rectangle>> shots = new Dictionary<IntPtr, KeyValuePair<Bitmap, Rectangle>>();
+        static int animOff;   // minimizaciones en curso con la animacion de Windows apagada
+
+        static Rectangle Frame(IntPtr h)
+        {
+            N.RECT r;
+            if (DwmGetWindowAttribute(h, 9, out r, 16) != 0) N.GetWindowRect(h, out r);
+            return Rectangle.FromLTRB(r.left, r.top, r.right, r.bottom);
+        }
+
+        static Bitmap Capture(IntPtr h, Rectangle frame)
+        {
+            N.RECT wr; N.GetWindowRect(h, out wr);
+            int w = wr.right - wr.left, hh = wr.bottom - wr.top;
+            if (w < 40 || hh < 40 || w > 8000 || hh > 8000) return null;
+            using (var full = new Bitmap(w, hh, System.Drawing.Imaging.PixelFormat.Format32bppArgb))
+            {
+                using (var g = Graphics.FromImage(full))
+                {
+                    IntPtr dc = g.GetHdc();
+                    bool ok;
+                    try { ok = PrintWindow(h, dc, 2); } finally { g.ReleaseHdc(dc); }
+                    if (!ok) return null;
+                }
+                // solo la parte visible (sin los bordes invisibles de Windows 11), reducida para animar rapido
+                var crop = new Rectangle(frame.Left - wr.left, frame.Top - wr.top, frame.Width, frame.Height);
+                crop.Intersect(new Rectangle(0, 0, w, hh));
+                float k = Math.Min(1f, 1100f / Math.Max(crop.Width, crop.Height));
+                var b = new Bitmap(Math.Max(1, (int)(crop.Width * k)), Math.Max(1, (int)(crop.Height * k)), System.Drawing.Imaging.PixelFormat.Format32bppPArgb);
+                using (var g = Graphics.FromImage(b))
+                {
+                    g.InterpolationMode = InterpolationMode.HighQualityBilinear;
+                    g.DrawImage(full, new Rectangle(0, 0, b.Width, b.Height), crop, GraphicsUnit.Pixel);
+                }
+                return b;
+            }
+        }
+
+        static void SystemAnim(bool on)
+        {
+            var ai = new ANIMATIONINFO { cbSize = 8 };
+            if (!on) { if (animOff++ == 0) { SpiAnim(0x48, 8, ref ai, 0); savedAnim = ai.iMinAnimate; ai.iMinAnimate = 0; SpiAnim(0x49, 8, ref ai, 0); } }
+            else if (--animOff <= 0) { animOff = 0; ai.iMinAnimate = savedAnim; SpiAnim(0x49, 8, ref ai, 0); }
+        }
+        static int savedAnim = 1;
+
+        public static void Minimize(IntPtr h)
+        {
+            if (!Enabled || TargetFor == null || N.IsIconic(h)) { N.ShowWindow(h, 6); return; }
+            try
+            {
+                var frame = Frame(h);
+                var shot = Capture(h, frame);
+                if (shot == null) { N.ShowWindow(h, 6); return; }
+                var target = TargetFor(h);
+                Remember(h, shot, frame);
+                var fx = new GenieForm(shot, frame, target, false);
+                fx.Shown += (o, e) =>
+                {
+                    // la ventana real desaparece al instante; la animacion la hace la capa
+                    SystemAnim(false);
+                    N.ShowWindow(h, 6);
+                    var t = new System.Windows.Forms.Timer { Interval = 250 };
+                    t.Tick += (o2, e2) => { t.Stop(); t.Dispose(); SystemAnim(true); };
+                    t.Start();
+                };
+                fx.Show();
+            }
+            catch (Exception ex) { Program.Log(ex); N.ShowWindow(h, 6); }
+        }
+
+        // devuelve true si hizo la animacion (y la ventana se restaura al final)
+        public static bool Restore(IntPtr h)
+        {
+            KeyValuePair<Bitmap, Rectangle> kv;
+            if (!Enabled || TargetFor == null || !shots.TryGetValue(h, out kv)) return false;
+            shots.Remove(h);
+            try
+            {
+                var fx = new GenieForm(kv.Key, kv.Value, TargetFor(h), true);
+                fx.FormClosed += (o, e) =>
+                {
+                    SystemAnim(false);
+                    N.ShowWindow(h, 9); N.SetForegroundWindow(h);
+                    var t = new System.Windows.Forms.Timer { Interval = 250 };
+                    t.Tick += (o2, e2) => { t.Stop(); t.Dispose(); SystemAnim(true); };
+                    t.Start();
+                    kv.Key.Dispose();
+                };
+                fx.Show();
+                return true;
+            }
+            catch (Exception ex) { Program.Log(ex); return false; }
+        }
+
+        static void Remember(IntPtr h, Bitmap shot, Rectangle frame)
+        {
+            KeyValuePair<Bitmap, Rectangle> old;
+            if (shots.TryGetValue(h, out old)) old.Key.Dispose();
+            shots[h] = new KeyValuePair<Bitmap, Rectangle>(shot, frame);
+            if (shots.Count > 24)   // no guardar capturas de ventanas que ya no existen
+                foreach (var k in new List<IntPtr>(shots.Keys)) if (!N.IsIconic(k)) { shots[k].Key.Dispose(); shots.Remove(k); }
+        }
+
+        public static void RestoreAnimOnExit() { if (animOff > 0) { animOff = 1; SystemAnim(true); } }
+    }
+
+    class GenieForm : Form
+    {
+        readonly Bitmap img; readonly Rectangle src, dst; readonly bool reverse;
+        readonly Rectangle box; LayeredCanvas canvas; VsyncTimer anim; Stopwatch clk = new Stopwatch();
+        const double Dur = 0.52;   // duracion del genio en macOS (aprox.)
+        const int Strips = 64;
+
+        public GenieForm(Bitmap img, Rectangle src, Rectangle dst, bool reverse)
+        {
+            this.img = img; this.src = src; this.dst = dst; this.reverse = reverse;
+            box = Rectangle.Union(src, dst); box.Inflate(4, 4);
+            FormBorderStyle = FormBorderStyle.None; ShowInTaskbar = false; StartPosition = FormStartPosition.Manual;
+            Bounds = box;
+            anim = new VsyncTimer(this); anim.Tick += (o, e) => Frame();
+        }
+
+        protected override CreateParams CreateParams { get { var cp = base.CreateParams; cp.ExStyle |= 0x80000 | 0x20 | 0x80 | 0x8000000 | 0x8; return cp; } }
+        protected override bool ShowWithoutActivation { get { return true; } }
+
+        protected override void OnShown(EventArgs e)
+        {
+            canvas = new LayeredCanvas(box.Width, box.Height);
+            Draw(reverse ? 1f : 0f);
+            base.OnShown(e);
+            clk.Start(); anim.Start();
+        }
+
+        void Frame()
+        {
+            double p = clk.Elapsed.TotalSeconds / Dur;
+            if (p >= 1) { anim.Stop(); Close(); return; }
+            Draw((float)(reverse ? 1 - p : p));
+        }
+
+        static float Smooth(float x) { x = x < 0 ? 0 : x > 1 ? 1 : x; return x * x * (3 - 2 * x); }
+
+        // t = 0: ventana completa; t = 1: dentro del icono.
+        // Cada franja horizontal avanza con retraso segun su altura: la parte de abajo se estira primero hacia el icono
+        // formando el embudo, y el resto de la ventana pasa despues por el (como el genio de macOS).
+        void Draw(float t)
+        {
+            float sx = src.Left - box.Left, sy = src.Top - box.Top, sw = src.Width, sh = src.Height;
+            float tx = dst.Left - box.Left, ty = dst.Top - box.Top, tw = dst.Width, th = dst.Height;
+            bool down = dst.Top + dst.Height / 2 >= src.Top + src.Height / 2;
+            int strips = Math.Max(64, Math.Min(220, src.Height / 4));
+            const float lag = 0.62f;
+            using (var g = Graphics.FromImage(canvas.Bitmap))
+            {
+                g.Clear(Color.Transparent);
+                g.InterpolationMode = InterpolationMode.Bilinear;
+                g.PixelOffsetMode = PixelOffsetMode.Half;
+                g.CompositingQuality = CompositingQuality.HighSpeed;
+                float ih = img.Height / (float)strips;
+                for (int i = 0; i < strips; i++)
+                {
+                    float v0 = i / (float)strips, v1 = (i + 1) / (float)strips;
+                    // si el dock estuviera arriba, lidera la parte superior
+                    float lead0 = down ? 1 - v0 : v0, lead1 = down ? 1 - v1 : v1;
+                    float q0 = Smooth(t * (1 + lag) - lead0 * lag), q1 = Smooth(t * (1 + lag) - lead1 * lag);
+                    float y0 = (sy + v0 * sh) + ((ty + v0 * th) - (sy + v0 * sh)) * q0;
+                    float y1 = (sy + v1 * sh) + ((ty + v1 * th) - (sy + v1 * sh)) * q1;
+                    float k = Smooth((q0 + q1) / 2 * 1.35f);
+                    float l = sx + (tx - sx) * k, r = sx + sw + (tx + tw - sx - sw) * k;
+                    if (y1 - y0 < 0.25f || r - l < 0.5f) continue;
+                    g.DrawImage(img, new RectangleF(l, y0, r - l, y1 - y0 + 0.6f), new RectangleF(0, i * ih, img.Width, ih), GraphicsUnit.Pixel);
+                }
+            }
+            canvas.Push(Handle, box.Left, box.Top);
+        }
+
+        protected override void Dispose(bool disposing)
+        {
+            if (disposing) { anim.Close(); if (canvas != null) { canvas.Dispose(); canvas = null; } if (!reverse) { } }
+            base.Dispose(disposing);
+        }
+    }
+}

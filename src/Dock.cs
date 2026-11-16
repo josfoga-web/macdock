@@ -111,6 +111,7 @@ namespace MacDock
         public bool Glass = true;
         public bool ShakeCursor = true;
         public bool TileKeys = true;
+        public bool GenieFx = true;
         public bool MacTitles = true;
         string path;
 
@@ -149,6 +150,7 @@ namespace MacDock
                 else if (k == "glass") Glass = v == "1";
                 else if (k == "shakecursor") ShakeCursor = v == "1";
                 else if (k == "tilekeys") TileKeys = v == "1";
+                else if (k == "geniefx") GenieFx = v == "1";
                 else if (k == "mactitles") MacTitles = v == "1";
                 else if (k == "devicemode" && int.TryParse(v, out i)) DeviceMode = Math.Max(0, Math.Min(2, i));
                 else if (k == "gamingmode") GamingMode = v == "1";
@@ -193,6 +195,7 @@ namespace MacDock
                     "Glass=" + (Glass ? 1 : 0) + "\r\n" +
                     "ShakeCursor=" + (ShakeCursor ? 1 : 0) + "\r\n" +
                     "TileKeys=" + (TileKeys ? 1 : 0) + "\r\n" +
+                    "GenieFx=" + (GenieFx ? 1 : 0) + "\r\n" +
                     "MacTitles=" + (MacTitles ? 1 : 0) + "\r\n" +
                     "DeviceMode=" + DeviceMode + "\r\n" +
                     "GamingMode=" + (GamingMode ? 1 : 0) + "\r\n" +
@@ -325,6 +328,8 @@ namespace MacDock
             global::MacDock.Glass.Enabled = cfg.Glass;
             SetShake(cfg.ShakeCursor);
             SetTileKeys(cfg.TileKeys);
+            global::MacDock.Genie.Enabled = cfg.GenieFx;
+            global::MacDock.Genie.TargetFor = GenieTarget;
             SetMacButtons(cfg.MacButtons);
             SetDesktopMenu(cfg.DesktopMenu);
             WatchDownloads();
@@ -345,6 +350,25 @@ namespace MacDock
                 else if (!on && liveDragChanged) { SpiSetPtr(0x0025, 0, IntPtr.Zero, 3); liveDragChanged = false; }
             }
             catch (Exception ex) { Program.Log(ex); }
+        }
+
+        // rectangulo en pantalla del icono de la app duena de la ventana (destino del efecto genio)
+        Rectangle GenieTarget(IntPtr h)
+        {
+            var scr = Screen.FromHandle(h).Bounds;
+            DockItem it = all.FirstOrDefault(i => i.Windows.Contains(h));
+            if (it == null)
+            {
+                uint pid; N.GetWindowThreadProcessId(h, out pid); string path = N.ProcessPath(pid);
+                it = all.FirstOrDefault(i => i.Kind == Kind.App && !string.IsNullOrEmpty(path) && string.Equals(i.Target, path, StringComparison.OrdinalIgnoreCase));
+            }
+            if (it != null && DockShown && !hiddenFull && all.Contains(it))
+            {
+                float size = Ic * it.Scale, x = winX + it.X + (it.W - size) / 2, y = winY + SlidePx + BarTop + PadY + Ic - size;
+                return new Rectangle((int)x, (int)y, Math.Max(8, (int)size), Math.Max(8, (int)size));
+            }
+            int w = (int)(48 * s);
+            return new Rectangle(scr.Left + scr.Width / 2 - w / 2, scr.Bottom - w / 3, w, w / 3);
         }
 
         CursorShake shake;
@@ -1764,7 +1788,7 @@ namespace MacDock
             int idx = ws.IndexOf(fg);
             if (idx < 0) Focus(ws[0]);
             else if (ws.Count > 1) Focus(ws[(idx + 1) % ws.Count]);
-            else N.ShowWindow(fg, 6);
+            else global::MacDock.Genie.Minimize(fg);
         }
 
         void ToggleStack(DockItem it)
@@ -1790,7 +1814,7 @@ namespace MacDock
 
         void Focus(IntPtr h)
         {
-            if (N.IsIconic(h)) N.ShowWindow(h, 9);
+            if (N.IsIconic(h)) { if (global::MacDock.Genie.Restore(h)) return; N.ShowWindow(h, 9); }
             N.SetForegroundWindow(h);
         }
 
@@ -1849,7 +1873,7 @@ namespace MacDock
                 {
                     Add(m, "Nueva ventana", () => Launch(it));
                     Add(m, "Mostrar todas las ventanas", () => { foreach (var h in it.Windows.ToList()) { if (N.IsIconic(h)) N.ShowWindow(h, 9); N.SetForegroundWindow(h); } });
-                    Add(m, "Ocultar", () => { foreach (var h in it.Windows.ToList()) N.ShowWindow(h, 6); });
+                    Add(m, "Ocultar", () => { foreach (var h in it.Windows.ToList()) global::MacDock.Genie.Minimize(h); });
                     Add(m, "Salir", () => { foreach (var h in it.Windows.ToList()) N.PostMessage(h, 0x10, IntPtr.Zero, IntPtr.Zero); });
                 }
                 else Add(m, "Abrir", () => Launch(it), true);
@@ -1921,6 +1945,7 @@ namespace MacDock
             addOpt("Transparencia estilo macOS (menús y paneles)", cfg.Glass, () => { cfg.Glass = !cfg.Glass; cfg.Save(); global::MacDock.Glass.Enabled = cfg.Glass; });
             addOpt("Agitar el mouse para agrandar el puntero", cfg.ShakeCursor, () => { cfg.ShakeCursor = !cfg.ShakeCursor; cfg.Save(); SetShake(cfg.ShakeCursor); });
             addOpt("Atajos para acomodar ventanas (Ctrl+Alt+flechas, F, C)", cfg.TileKeys, () => { cfg.TileKeys = !cfg.TileKeys; cfg.Save(); SetTileKeys(cfg.TileKeys); });
+            addOpt("Efecto genio al minimizar (como macOS)", cfg.GenieFx, () => { cfg.GenieFx = !cfg.GenieFx; cfg.Save(); global::MacDock.Genie.Enabled = cfg.GenieFx; });
             addOpt("Efecto lupa", cfg.Magnify, () => { cfg.Magnify = !cfg.Magnify; cfg.Save(); Relayout(); });
             addOpt("Vista previa de ventanas al pasar el mouse", cfg.WindowPreviews, () => { cfg.WindowPreviews = !cfg.WindowPreviews; cfg.Save(); if (!cfg.WindowPreviews) ClosePreview(); });
             addOpt("Soporte multi-monitor (dock y barra superior)", cfg.MultiMonitor, () =>
@@ -2326,7 +2351,7 @@ namespace MacDock
             try { StopMacFeatures(); } catch { }
             try { EdgeTiler.Stop(); } catch { }
             try { if (liveDragChanged) SetLiveDrag(false); } catch { }
-            try { SetShake(false); SetTileKeys(false); } catch { }
+            try { SetShake(false); SetTileKeys(false); global::MacDock.Genie.RestoreAnimOnExit(); } catch { }
             try { if (bar != null) { bar.Close(); bar = null; } } catch { }
             try { UnregisterAppBar(); } catch { }
             try

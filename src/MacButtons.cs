@@ -408,7 +408,7 @@ namespace MacDock
             else if (i == 1)
             {
                 if (option) foreach (var w in SameApp()) N.PostMessage(w, 0x0112, new IntPtr(0xF020), IntPtr.Zero);   // minimizar todas
-                else N.PostMessage(h, 0x0112, new IntPtr(0xF020), IntPtr.Zero);
+                else Genie.Minimize(h);   // efecto genio hacia el dock
             }
             else if (option) MenuBar.TileWindow(h, 10);   // Option+verde: llenar la pantalla sin pantalla completa (zoom)
             else

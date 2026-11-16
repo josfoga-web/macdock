@@ -601,7 +601,7 @@ namespace MacDock
             Item(m, "Acerca de " + appName, () => { });
             ((ToolStripMenuItem)m.Items[m.Items.Count - 1]).Enabled = false;
             m.Items.Add(new ToolStripSeparator());
-            Item(m, "Ocultar " + appName, () => N.ShowWindow(h, 6), "Ctrl+H");
+            Item(m, "Ocultar " + appName, () => Genie.Minimize(h), "Ctrl+H");
             m.Items.Add(new ToolStripSeparator());
             Item(m, "Salir de " + appName, () => N.PostMessage(h, 0x10, IntPtr.Zero, IntPtr.Zero), "Alt+F4");
             Show(m, rApp);
@@ -617,7 +617,7 @@ namespace MacDock
                 Item(m, "Vista de tareas", () => N.PressKeys(0x5B, 0x09), "Win+Tab");
                 Show(m, anchorRect); return;
             }
-            Item(m, "Minimizar", () => N.ShowWindow(h, 6), "Win+↓");
+            Item(m, "Minimizar", () => Genie.Minimize(h), "Win+↓");
             Item(m, N.IsZoomed(h) ? "Restaurar tamaño" : "Zoom", () => N.ShowWindow(h, N.IsZoomed(h) ? 9 : 3));
             m.Items.Add(new ToolStripSeparator());
             AddTilingItems(m, h);
