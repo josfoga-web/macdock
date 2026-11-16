@@ -381,12 +381,15 @@ namespace MacDock
         [System.Runtime.InteropServices.DllImport("user32.dll")] static extern short GetAsyncKeyState(int vk);
         [System.Runtime.InteropServices.DllImport("user32.dll")] static extern bool PostMessage(IntPtr h, int msg, IntPtr w, IntPtr l);
         [System.Runtime.InteropServices.DllImport("user32.dll")] static extern bool PrintWindow(IntPtr h, IntPtr hdc, uint flags);
+        [System.Runtime.InteropServices.DllImport("user32.dll")] static extern IntPtr SendMessageTimeout(IntPtr h, int msg, IntPtr w, IntPtr l, int flags, int timeout, out IntPtr result);
 
         public static bool Enabled = true;
         public static Func<Rectangle[]> AvoidRects;   // lo conecta el dock: zonas de MacDock que no deben salir en la captura
         static WinEventProc proc; static IntPtr hook;
         static IntPtr pending; static Rectangle pendingFrame; static bool pendingOwn; static Point pendingCursor;
         static Snapshot preShot;
+        static bool cancelled;      // el arrastre de Windows ya se corto al presionar (antes de que la ventana se mueva)
+        static WobbleForm warm;     // ventana de la gelatina creada al presionar, lista para el primer movimiento
         static VsyncTimer pendingTimer; static Control helper;
         static WobbleForm cur;
 
@@ -412,7 +415,8 @@ namespace MacDock
         static void OnEvent(IntPtr hk, uint ev, IntPtr h, int obj, int child, uint thread, uint time)
         {
             if (obj != 0 || h == IntPtr.Zero) return;
-            if (ev == 0x000A) BeginExternal(h); else EndExternal(h);
+            if (ev == 0x000A) BeginExternal(h);
+            else if (!(h == pending && cancelled)) EndExternal(h);   // el fin que provoca el propio corte no cuenta
         }
 
         public static void BeginExternal(IntPtr h) { BeginExternal(h, false); }
@@ -423,16 +427,42 @@ namespace MacDock
             int st = N.GetWindowLong(h, -16);
             if (!own && (st & 0x00C00000) != 0x00C00000 && (st & 0x00040000) == 0) return;
             if ((N.GetWindowLong(h, -20) & 0x80000) != 0) return;   // ya es transparente por su cuenta: no se toca
-            pending = h; pendingOwn = own; pendingFrame = Genie.Frame(h); pendingCursor = Cursor.Position;
+            var c = Cursor.Position;
+            // solo arrastres desde la barra de titulo (no redimensiones ni el teclado)
+            if (!own && !OnCaption(h, c)) return;
+            pending = h; pendingOwn = own; pendingFrame = Genie.Frame(h); pendingCursor = c;
             preShot = Capture(h, pendingFrame);   // antes de que se mueva, y sin bloquear a la app
             if (preShot == null) { pending = IntPtr.Zero; return; }
+            // El arrastre de Windows se corta YA, con la ventana aun quieta: al cortarlo Windows la devuelve a donde
+            // empezo, y si eso pasa con la gelatina en marcha la ventana real reaparece un instante (el parpadeo).
+            cancelled = false;
+            if (!own) { PostMessage(h, 0x001F, IntPtr.Zero, IntPtr.Zero); cancelled = true; }
             WobbleForm.Prepare(pendingFrame.Width, pendingFrame.Height);   // lienzo listo antes del primer movimiento
+            try { warm = new WobbleForm(h, preShot, pendingFrame, pendingCursor); var wh = warm.Handle; } catch (Exception ex) { Program.Log(ex); warm = null; }
             pendingTimer.Start();
         }
 
+        static bool OnCaption(IntPtr h, Point c)
+        {
+            IntPtr r;
+            if (SendMessageTimeout(h, 0x0084, IntPtr.Zero, new IntPtr((c.Y << 16) | (c.X & 0xFFFF)), 0x0002, 40, out r) == IntPtr.Zero) return false;
+            return r.ToInt64() == 2;   // HTCAPTION
+        }
+
+        static void Abort()
+        {
+            var h = pending; bool wasCut = cancelled;
+            pending = IntPtr.Zero; pendingTimer.Stop(); preShot = null; cancelled = false;
+            if (warm != null) { warm.Dispose(); warm = null; }
+            if (wasCut && h != IntPtr.Zero) EdgeTiler.EndExternal(h);   // su fin de arrastre se ignoro: se avisa aqui
+        }
+
+        // la ventana esta en manos de la gelatina (o lo va a estar en cuanto se mueva el puntero)
+        public static bool Owns(IntPtr h) { return IsWobbling(h) || (h == pending && cancelled); }
+
         public static void EndExternal(IntPtr h)
         {
-            if (h == pending) { pending = IntPtr.Zero; pendingTimer.Stop(); preShot = null; }
+            if (h == pending) Abort();
             // con el arrastre tomado, el soltar lo detecta MacDock (el fin de arrastre de Windows llega al tomarlo)
         }
 
@@ -442,23 +472,23 @@ namespace MacDock
         {
             if (pending == IntPtr.Zero) { pendingTimer.Stop(); return; }
             int vk = SystemInformation.MouseButtonsSwapped ? 0x02 : 0x01;
-            if ((GetAsyncKeyState(vk) & 0x8000) == 0) { pending = IntPtr.Zero; pendingTimer.Stop(); preShot = null; return; }
+            if ((GetAsyncKeyState(vk) & 0x8000) == 0) { Abort(); return; }   // fue solo un clic
             var f = Genie.Frame(pending);
-            if (f.Size != pendingFrame.Size) { pending = IntPtr.Zero; pendingTimer.Stop(); preShot = null; return; }   // es una redimension
+            if (f.Size != pendingFrame.Size) { Abort(); return; }   // es una redimension
             var c = Cursor.Position;
-            if (f.Location == pendingFrame.Location && Math.Abs(c.X - pendingCursor.X) + Math.Abs(c.Y - pendingCursor.Y) < 3) return;
+            if (Math.Abs(c.X - pendingCursor.X) + Math.Abs(c.Y - pendingCursor.Y) < 3 && (cancelled || f.Location == pendingFrame.Location)) return;
             var h = pending; pending = IntPtr.Zero; pendingTimer.Stop();
             Start(h, pendingOwn);
         }
 
         static void Start(IntPtr h, bool own)
         {
-            var shot = preShot; preShot = null;
+            var shot = preShot; preShot = null; cancelled = false;
             if (shot == null) return;
             if (own) WindowDrag.Stop();   // el Finder deja de moverse por su cuenta: lo mueve la gelatina
-            else PostMessage(h, 0x001F, IntPtr.Zero, IntPtr.Zero);   // WM_CANCELMODE: MacDock toma el arrastre de Windows
             // el punto agarrado se mide respecto a la ventana ANTES de moverse (asi el primer cuadro no salta)
-            cur = new WobbleForm(h, shot, pendingFrame, pendingCursor);
+            cur = warm ?? new WobbleForm(h, shot, pendingFrame, pendingCursor);
+            warm = null;
             cur.FormClosed += (o, e) => { if (cur == o) cur = null; };
             cur.Show();
         }
@@ -626,7 +656,7 @@ namespace MacDock
             var real = Genie.Frame(Target);
             if (real.Width != W || real.Height != H) { running = false; EndOnUi(true); return; }   // la redimensionaron
             // si el arrastre de Windows tardo en soltarse y devolvio la ventana real a la vista, se aparta otra vez
-            if (parked && !released && now - lastPark > 0.05 && SystemInformation.VirtualScreen.IntersectsWith(real)) { lastPark = now; Park(); }
+            if (parked && !released && now - lastPark > 0.004 && SystemInformation.VirtualScreen.IntersectsWith(real)) { lastPark = now; Park(); }
             var cpos = Cursor.Position;
             if (!released)
             {

@@ -64,7 +64,7 @@ $res = @(
     "/resource:$src\fonts\Inter-SemiBold.ttf,Inter-SemiBold.ttf",
     "/resource:$src\fonts\OFL.txt,OFL.txt")
 $out = Join-Path $build "MacDock.exe"
-$args2 = @("/nologo", "/target:winexe", "/platform:x64", "/optimize+",
+$args2 = @("/nologo", "/target:winexe", "/platform:x64", "/optimize+", "/unsafe",
            "/win32icon:$src\dock.ico", "/win32manifest:$manGen") + $res +
          @("/out:$out", "/r:System.Windows.Forms.dll", "/r:System.Drawing.dll", "/r:System.Data.dll", "/r:System.Core.dll", "/r:Microsoft.CSharp.dll") + $cs
 & $csc @args2

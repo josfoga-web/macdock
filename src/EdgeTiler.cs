@@ -62,7 +62,7 @@ namespace MacDock
             {
                 if (obj != 0 || h == IntPtr.Zero) return;
                 if (ev == 0x000A) Begin(h);
-                else if (!Wobbly.IsWobbling(h)) End(h);   // con la gelatina, el fin real lo avisa ella al soltar
+                else if (!Wobbly.Owns(h)) End(h);   // con la gelatina, el fin real lo avisa ella al soltar
             }
             catch (Exception ex) { Program.Log(ex); }
         }
@@ -112,7 +112,7 @@ namespace MacDock
         {
             if (dragWnd == IntPtr.Zero) { track.Stop(); return; }
             N.RECT r; N.GetWindowRect(dragWnd, out r);
-            bool wob = Wobbly.IsWobbling(dragWnd);
+            bool wob = Wobbly.Owns(dragWnd);
             bool moved = wob || r.left != startRect.left || r.top != startRect.top;
             bool sameSize = wob || r.right - r.left == startRect.right - startRect.left && r.bottom - r.top == startRect.bottom - startRect.top;
             int z = 0;
