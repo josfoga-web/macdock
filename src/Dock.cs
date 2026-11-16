@@ -105,6 +105,8 @@ namespace MacDock
         public bool HideTaskbar = true;
         public bool Magnify = true;
         public bool MacIcons = true;
+        public bool BarAutoHide = true;
+        public bool EdgeTiling = true;
         string path;
 
         public Config(string p)
@@ -136,6 +138,8 @@ namespace MacDock
                 else if (k == "windowpreviews") WindowPreviews = v == "1";
                 else if (k == "multimonitor") MultiMonitor = v == "1";
                 else if (k == "macicons") MacIcons = v == "1";
+                else if (k == "barautohide") BarAutoHide = v == "1";
+                else if (k == "edgetiling") EdgeTiling = v == "1";
                 else if (k == "devicemode" && int.TryParse(v, out i)) DeviceMode = Math.Max(0, Math.Min(2, i));
                 else if (k == "gamingmode") GamingMode = v == "1";
                 else if (k == "lightfrom") { TimeSpan t; if (TimeSpan.TryParse(v, out t)) LightFrom = t; }
@@ -173,6 +177,8 @@ namespace MacDock
                     "WindowPreviews=" + (WindowPreviews ? 1 : 0) + "\r\n" +
                     "MultiMonitor=" + (MultiMonitor ? 1 : 0) + "\r\n" +
                     "MacIcons=" + (MacIcons ? 1 : 0) + "\r\n" +
+                    "BarAutoHide=" + (BarAutoHide ? 1 : 0) + "\r\n" +
+                    "EdgeTiling=" + (EdgeTiling ? 1 : 0) + "\r\n" +
                     "DeviceMode=" + DeviceMode + "\r\n" +
                     "GamingMode=" + (GamingMode ? 1 : 0) + "\r\n" +
                     "ReserveSpace=" + (ReserveSpace ? 1 : 0) + "\r\n" +
@@ -749,6 +755,7 @@ namespace MacDock
         {
             if (on && bar == null)
             {
+                MenuBar.AutoHideMax = cfg.BarAutoHide;
                 bar = new MenuBar(s, light, Screen.PrimaryScreen, false, cfg.MultiMonitor);
                 bar.ToggleTheme = ToggleTheme;
                 bar.ShowTray = ShowTray;
@@ -909,6 +916,7 @@ namespace MacDock
             if (cfg.ReserveSpace) RegisterAppBar();
             RefreshRunning();
             Relayout();
+            if (cfg.EdgeTiling) try { EdgeTiler.Start(s); } catch (Exception ex) { Program.Log(ex); }
             SetupWatcher();
             SystemEvents.PowerModeChanged += (o, a) => BeginInvoke(new Action(() => { lastPower = (PowerLineStatus)(-1); refreshCheckAt = DateTime.Now.AddSeconds(2); }));
             ApplyRefresh();
@@ -1762,6 +1770,8 @@ namespace MacDock
             opts.DropDownItems.Add(new ToolStripSeparator());
 
             addOpt("Iconos estilo macOS (forma redondeada)", cfg.MacIcons, () => { cfg.MacIcons = !cfg.MacIcons; cfg.Save(); RefreshIcons(); });
+            addOpt("Ocultar barra superior con ventanas maximizadas", cfg.BarAutoHide, () => { cfg.BarAutoHide = !cfg.BarAutoHide; cfg.Save(); MenuBar.AutoHideMax = cfg.BarAutoHide; });
+            addOpt("Acomodar ventanas arrastrándolas a los bordes (macOS)", cfg.EdgeTiling, () => { cfg.EdgeTiling = !cfg.EdgeTiling; cfg.Save(); if (cfg.EdgeTiling) EdgeTiler.Start(s); else EdgeTiler.Stop(); });
             addOpt("Efecto lupa", cfg.Magnify, () => { cfg.Magnify = !cfg.Magnify; cfg.Save(); Relayout(); });
             addOpt("Vista previa de ventanas al pasar el mouse", cfg.WindowPreviews, () => { cfg.WindowPreviews = !cfg.WindowPreviews; cfg.Save(); if (!cfg.WindowPreviews) ClosePreview(); });
             addOpt("Soporte multi-monitor (dock y barra superior)", cfg.MultiMonitor, () =>
@@ -2126,6 +2136,7 @@ namespace MacDock
             if (loweredRefresh) RestoreRefresh();
             try { nap.WakeAll(); } catch { }
             try { StopMacFeatures(); } catch { }
+            try { EdgeTiler.Stop(); } catch { }
             try { if (bar != null) { bar.Close(); bar = null; } } catch { }
             try { UnregisterAppBar(); } catch { }
             try

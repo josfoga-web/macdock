@@ -41,6 +41,14 @@ namespace MacDock
         bool onDesk = true;                 // el escritorio esta al frente: la barra muestra "Finder"
         List<KeyValuePair<string, RectangleF>> menus = new List<KeyValuePair<string, RectangleF>>();
         RectangleF hl = RectangleF.Empty;   // elemento resaltado mientras su menu esta abierto (como en macOS)
+        RectangleF rSearch;
+        // Como la pantalla completa de macOS: con una ventana maximizada al frente la barra sube y se esconde,
+        // la app usa toda la pantalla, y al llevar el mouse al borde superior la barra baja por encima.
+        public static bool AutoHideMax = true;
+        bool covered; float off, offFrom, offTarget; double offT0, offDur = 0.25;
+        VsyncTimer slideAnim; Stopwatch clk = Stopwatch.StartNew();
+        System.Windows.Forms.Timer watch = new System.Windows.Forms.Timer { Interval = 50 };
+        DateTime pendingSince = DateTime.MaxValue, edgeSince = DateTime.MaxValue, awaySince = DateTime.MaxValue;
         Dictionary<string, string> nameCache = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
         static readonly uint myPid = (uint)Process.GetCurrentProcess().Id;
 
@@ -55,6 +63,8 @@ namespace MacDock
             Bounds = new Rectangle(0, 0, 1, 1);
             appBarMsg = N.RegisterWindowMessage("MacDockMenuBarMsg_" + targetScreen.DeviceName.GetHashCode());
             timer.Interval = 10000; timer.Tick += (o, e) => Redraw(false);
+            slideAnim = new VsyncTimer(this); slideAnim.Tick += (o, e) => SlideFrame();
+            watch.Tick += (o, e) => { try { WatchCover(); } catch (Exception ex) { Program.Log(ex); } };
         }
 
         protected override CreateParams CreateParams
@@ -81,7 +91,8 @@ namespace MacDock
                 SyncSecondaryBars();
             }
             UpdateActive(Win32Fg());
-            timer.Start();
+            timer.Start(); watch.Start();
+            Blur(true);
         }
 
         public void SetMultiMonitor(bool on)
@@ -166,8 +177,7 @@ namespace MacDock
             }
             else
             {
-                N.ShowWindow(Handle, 8);
-                N.SetWindowPos(Handle, new IntPtr(-1), 0, 0, 0, 0, 0x13);
+                if (off < 1f) { N.ShowWindow(Handle, 8); N.SetWindowPos(Handle, new IntPtr(-1), 0, 0, 0, 0, 0x13); }
                 Redraw(true);
             }
         }
@@ -204,7 +214,8 @@ namespace MacDock
                     g.SmoothingMode = SmoothingMode.AntiAlias;
                     g.TextRenderingHint = TextRenderingHint.AntiAlias;
                     g.PixelOffsetMode = PixelOffsetMode.HighQuality;
-                    Color bg = light ? Color.FromArgb(190, 246, 246, 248) : Color.FromArgb(150, 18, 18, 22);
+                    Color bg = blurOn ? (light ? Color.FromArgb(150, 240, 240, 244) : Color.FromArgb(110, 14, 14, 18))
+                                     : (light ? Color.FromArgb(190, 246, 246, 248) : Color.FromArgb(150, 18, 18, 22));
                     Color fg = light ? Color.FromArgb(255, 20, 20, 22) : Color.FromArgb(255, 245, 245, 247);
                     Color dim = light ? Color.FromArgb(150, 20, 20, 22) : Color.FromArgb(160, 245, 245, 247);
                     using (var b = new SolidBrush(bg)) g.FillRectangle(b, 0, 0, W, H);
@@ -262,6 +273,16 @@ namespace MacDock
                         rCc = new RectangleF(rx - 6 * s, 0, ccW + 12 * s, H);
                         rx -= 16 * s;
 
+                        // lupa de Spotlight
+                        float sr = 5.2f * s, scx = rx - sr - 2.2f * s, scy = cy - 1.2f * s;
+                        using (var pen = new Pen(fg, Math.Max(1f, 1.45f * s)) { StartCap = LineCap.Round, EndCap = LineCap.Round })
+                        {
+                            g.DrawEllipse(pen, scx - sr, scy - sr, sr * 2, sr * 2);
+                            g.DrawLine(pen, scx + sr * 0.72f, scy + sr * 0.72f, scx + sr * 1.45f, scy + sr * 1.45f);
+                        }
+                        rSearch = new RectangleF(scx - sr - 6 * s, 0, sr * 2.5f + 12 * s, H);
+                        rx = scx - sr - 16 * s;
+
                         float pct = ps.BatteryLifePercent;
                         if (!isDesk && pct >= 0 && pct <= 1 && ps.BatteryChargeStatus != BatteryChargeStatus.NoSystemBattery)
                         {
@@ -316,6 +337,99 @@ namespace MacDock
             }
         }
 
+        // ---------- desenfoque detras de la barra (como la barra de menus de macOS) ----------
+        [StructLayout(LayoutKind.Sequential)] struct AccentPolicy { public int State, Flags, Color, Anim; }
+        [StructLayout(LayoutKind.Sequential)] struct WinCompAttr { public int Attr; public IntPtr Data; public int Size; }
+        [DllImport("user32.dll")] static extern int SetWindowCompositionAttribute(IntPtr h, ref WinCompAttr d);
+        bool blurOn;
+
+        void Blur(bool on)
+        {
+            try
+            {
+                var acc = new AccentPolicy { State = on ? 3 : 0, Flags = 0, Color = 0 };
+                int size = Marshal.SizeOf(acc); IntPtr ptr = Marshal.AllocHGlobal(size);
+                try
+                {
+                    Marshal.StructureToPtr(acc, ptr, false);
+                    var d = new WinCompAttr { Attr = 19, Data = ptr, Size = size };
+                    blurOn = SetWindowCompositionAttribute(Handle, ref d) != 0 && on;
+                }
+                finally { Marshal.FreeHGlobal(ptr); }
+                Redraw(true);
+            }
+            catch { blurOn = false; }
+        }
+
+        // ---------- ocultar con ventanas maximizadas ----------
+        bool MaximizedHere()
+        {
+            IntPtr fg = N.GetForegroundWindow();
+            if (fg == IntPtr.Zero || fg == Handle || !N.IsZoomed(fg) || N.IsIconic(fg)) return false;
+            uint pid; N.GetWindowThreadProcessId(fg, out pid);
+            if (pid == myPid) return false;
+            string cls = N.ClassOf(fg);
+            if (cls == "Progman" || cls == "WorkerW" || cls == "Shell_TrayWnd" || cls == "Shell_SecondaryTrayWnd") return false;
+            return Screen.FromHandle(fg).DeviceName == targetScreen.DeviceName;
+        }
+
+        void WatchCover()
+        {
+            if (full || IsDisposed) return;
+            bool want = AutoHideMax && MaximizedHere();
+            if (want != covered)
+            {
+                if (pendingSince == DateTime.MaxValue) pendingSince = DateTime.Now;
+                else if ((DateTime.Now - pendingSince).TotalMilliseconds > 220) { pendingSince = DateTime.MaxValue; SetCovered(want); }
+            }
+            else pendingSince = DateTime.MaxValue;
+            if (!covered) return;
+
+            var c = Cursor.Position; var b = targetScreen.Bounds;
+            bool inX = c.X >= b.Left && c.X < b.Right;
+            if (offTarget >= 1f)
+            {
+                // hay que dejar el mouse un instante en el borde, como en macOS (evita que salga al usar las pestanas)
+                if (inX && c.Y <= b.Top + 1) { if (edgeSince == DateTime.MaxValue) edgeSince = DateTime.Now; else if ((DateTime.Now - edgeSince).TotalMilliseconds > 260) { edgeSince = DateTime.MaxValue; SlideTo(0f); } }
+                else edgeSince = DateTime.MaxValue;
+            }
+            else
+            {
+                bool keep = !hl.IsEmpty || (inX && c.Y < b.Top + H + 6 * s);
+                if (keep) awaySince = DateTime.MaxValue;
+                else if (awaySince == DateTime.MaxValue) awaySince = DateTime.Now;
+                else if ((DateTime.Now - awaySince).TotalMilliseconds > 420) { awaySince = DateTime.MaxValue; SlideTo(1f); }
+            }
+        }
+
+        void SetCovered(bool on)
+        {
+            covered = on;
+            if (on) { Unregister(); SlideTo(1f); }
+            else { RegisterAppBar(); SlideTo(0f); }
+        }
+
+        void SlideTo(float target)
+        {
+            if (target == offTarget && (off == target || slideAnim.Enabled)) return;
+            offFrom = off; offTarget = target; offT0 = clk.Elapsed.TotalSeconds; offDur = target > off ? 0.3 : 0.24;
+            if (target < 1f && !Visible || target < 1f && !N.IsWindowVisible(Handle)) { N.ShowWindow(Handle, 8); N.SetWindowPos(Handle, new IntPtr(-1), 0, 0, 0, 0, 0x13); }
+            slideAnim.Start();
+        }
+
+        void SlideFrame()
+        {
+            double p = (clk.Elapsed.TotalSeconds - offT0) / offDur;
+            float k = offTarget > offFrom ? Ease.InOutCubic(p) : Ease.OutCubic(p);
+            off = p >= 1 ? offTarget : offFrom + (offTarget - offFrom) * k;
+            N.SetWindowPos(Handle, new IntPtr(-1), X, Y - (int)Math.Round(off * H), 0, 0, 0x0001 | 0x0010);
+            if (p >= 1)
+            {
+                slideAnim.Stop();
+                if (off >= 1f) N.ShowWindow(Handle, 0); else Redraw(true);
+            }
+        }
+
         static void DrawControlCenterIcon(Graphics g, float x, float y, float w, float h, Color fg, float s)
         {
             float ph = h * 0.42f;
@@ -355,7 +469,7 @@ namespace MacDock
             try
             {
                 hb = bmp.GetHbitmap(Color.FromArgb(0)); old = N.SelectObject(memDc, hb);
-                var size = new N.SIZE { cx = W, cy = H }; var src = new N.POINT(); var dst = new N.POINT { x = X, y = Y };
+                var size = new N.SIZE { cx = W, cy = H }; var src = new N.POINT(); var dst = new N.POINT { x = X, y = Y - (int)Math.Round(off * H) };
                 var bl = new N.BLENDFUNCTION { BlendOp = 0, SourceConstantAlpha = 255, AlphaFormat = 1 };
                 N.UpdateLayeredWindow(Handle, screenDc, ref dst, ref size, memDc, ref src, 0, ref bl, 2);
             }
@@ -375,7 +489,8 @@ namespace MacDock
             {
                 foreach (var mn in menus)
                     if (mn.Value.Contains(e.Location)) { OpenAppMenu(mn.Key, mn.Value); return; }
-                if (rTheme.Contains(e.Location)) { if (ToggleTheme != null) ToggleTheme(); }
+                if (rSearch.Contains(e.Location)) { Flash(rSearch); Spotlight.Toggle(light, s); }
+                else if (rTheme.Contains(e.Location)) { if (ToggleTheme != null) ToggleTheme(); }
                 else if (rTray.Contains(e.Location)) { if (ShowTray != null) ShowTray(); }
                 else if (rLogo.Contains(e.Location)) SystemMenu();
                 else if (rApp.Contains(e.Location)) AppMenu();
@@ -699,7 +814,7 @@ namespace MacDock
         [DllImport("dwmapi.dll")] static extern int DwmFlush();
         static int animGen;
 
-        static void AnimateBounds(IntPtr h, int x, int y, int w, int hh)
+        internal static void AnimateBounds(IntPtr h, int x, int y, int w, int hh)
         {
             N.RECT cur;
             if (!N.GetWindowRect(h, out cur) || SystemInformation.TerminalServerSession) { SetWindowBoundsCompensated(h, x, y, w, hh); return; }
@@ -790,7 +905,7 @@ namespace MacDock
         {
             try
             {
-                timer.Stop();
+                timer.Stop(); watch.Stop(); slideAnim.Close();
                 if (hook != IntPtr.Zero) UnhookWinEvent(hook);
                 hook = IntPtr.Zero;
                 Unregister();

@@ -21,7 +21,7 @@ namespace MacDock
             m.ShowCheckMargin = false;
             m.Renderer = new MacRenderer(light);
             m.Font = MenuFont;
-            m.Padding = new Padding(5, 5, 5, 5);
+            m.Padding = new Padding(6, 6, 6, 6);
             m.DropShadowEnabled = true;
             Hook(m, light);
             return m;
@@ -34,7 +34,7 @@ namespace MacDock
             {
                 foreach (ToolStripItem it in d.Items)
                 {
-                    it.Padding = new Padding(6, 4, 14, 4);
+                    it.Padding = new Padding(8, 5, 16, 5);
                     var mi = it as ToolStripMenuItem;
                     if (mi != null && mi.HasDropDownItems)
                     {
@@ -48,7 +48,36 @@ namespace MacDock
                     }
                 }
             };
-            d.Opened += (o, e) => Round(d.Handle, light);
+            d.Opened += (o, e) => { Round(d.Handle, light); Fade(d, 0f, 1f, 0.12, null); };
+            if (d is ContextMenuStrip)
+            {
+                bool closingNow = false;
+                d.Closing += (o, e) =>
+                {
+                    // al elegir una opcion se cierra al instante; si no, se desvanece como en macOS
+                    if (closingNow || e.CloseReason == ToolStripDropDownCloseReason.ItemClicked || !d.Visible) return;
+                    e.Cancel = true; closingNow = true;
+                    Fade(d, (float)d.Opacity, 0f, 0.1, () => { try { d.Close(e.CloseReason); } catch { } closingNow = false; });
+                };
+            }
+        }
+
+        static void Fade(ToolStripDropDown d, float from, float to, double dur, Action done)
+        {
+            try
+            {
+                d.Opacity = from;
+                var clock = System.Diagnostics.Stopwatch.StartNew();
+                var t = new Timer { Interval = 8 };
+                t.Tick += (o, e) =>
+                {
+                    double p = clock.Elapsed.TotalSeconds / dur;
+                    try { if (!d.IsDisposed) d.Opacity = from + (to - from) * Ease.OutCubic(p); } catch { }
+                    if (p >= 1 || d.IsDisposed) { t.Stop(); t.Dispose(); if (done != null) done(); }
+                };
+                t.Start();
+            }
+            catch { if (done != null) done(); }
         }
 
         public static void Round(IntPtr h, bool light)
@@ -183,8 +212,8 @@ namespace MacDock
         {
             if (!e.Item.Selected || !e.Item.Enabled) return;
             var g = e.Graphics; g.SmoothingMode = SmoothingMode.AntiAlias;
-            var r = new RectangleF(2, 1, e.Item.Width - 4, e.Item.Height - 2);
-            using (var p = Round(r, 5)) using (var b = new SolidBrush(sel)) g.FillPath(b, p);
+            var r = new RectangleF(1, 0.5f, e.Item.Width - 2, e.Item.Height - 1);
+            using (var p = Round(r, 6)) using (var b = new SolidBrush(sel)) g.FillPath(b, p);
         }
 
         protected override void OnRenderItemText(ToolStripItemTextRenderEventArgs e)
@@ -199,7 +228,7 @@ namespace MacDock
         protected override void OnRenderSeparator(ToolStripSeparatorRenderEventArgs e)
         {
             int y = e.Item.Height / 2;
-            using (var p = new Pen(sep)) e.Graphics.DrawLine(p, 10, y, e.Item.Width - 10, y);
+            using (var p = new Pen(sep)) e.Graphics.DrawLine(p, 12, y, e.Item.Width - 12, y);
         }
 
         protected override void OnRenderArrow(ToolStripArrowRenderEventArgs e)
