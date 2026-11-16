@@ -453,6 +453,37 @@ namespace MacDock
             covered = on;
             if (on) { Unregister(); SlideTo(1f); }
             else { RegisterAppBar(); SlideTo(0f); }
+            // Windows no siempre reacomoda las ventanas maximizadas al cambiar el area reservada: se ajustan a mano
+            var t = new System.Windows.Forms.Timer { Interval = 140 };
+            t.Tick += (o, e) => { t.Stop(); t.Dispose(); try { FitMaximized(); } catch (Exception ex) { Program.Log(ex); } };
+            t.Start();
+        }
+
+        [StructLayout(LayoutKind.Sequential)] struct MONITORINFO { public int cbSize; public N.RECT rcMonitor, rcWork; public int dwFlags; }
+        [DllImport("user32.dll")] static extern IntPtr MonitorFromWindow(IntPtr h, int flags);
+        [DllImport("user32.dll")] static extern bool GetMonitorInfo(IntPtr mon, ref MONITORINFO mi);
+
+        void FitMaximized()
+        {
+            N.EnumWindows((h, l) =>
+            {
+                if (!N.IsWindowVisible(h) || !N.IsZoomed(h)) return true;
+                var mi = new MONITORINFO { cbSize = Marshal.SizeOf(typeof(MONITORINFO)) };
+                if (!GetMonitorInfo(MonitorFromWindow(h, 2), ref mi)) return true;
+                if (Screen.FromHandle(h).DeviceName != targetScreen.DeviceName) return true;
+                var wk = mi.rcWork;
+                if (!covered && wk.top < mi.rcMonitor.top + BarHeight) wk.top = mi.rcMonitor.top + BarHeight;
+                N.RECT wr, ext; N.GetWindowRect(h, out wr);
+                int dL = 0, dT = 0, dR = 0, dB = 0;
+                if (N.DwmGetWindowAttribute(h, 9, out ext, 16) == 0)
+                {
+                    dL = ext.left - wr.left; dT = ext.top - wr.top; dR = wr.right - ext.right; dB = wr.bottom - ext.bottom;
+                    if (dL < 0 || dL > 32 || dT < 0 || dT > 32 || dR < 0 || dR > 32 || dB < 0 || dB > 32) dL = dT = dR = dB = 0;
+                    if (ext.top == wk.top && ext.bottom == wk.bottom && ext.left == wk.left && ext.right == wk.right) return true;
+                }
+                N.SetWindowPos(h, IntPtr.Zero, wk.left - dL, wk.top - dT, wk.right - wk.left + dL + dR, wk.bottom - wk.top + dT + dB, 0x0004 | 0x0010 | 0x0200);
+                return true;
+            }, IntPtr.Zero);
         }
 
         void SlideTo(float target)
@@ -916,10 +947,19 @@ namespace MacDock
             N.SHAppBarMessage(3, ref abd);
         }
 
+        // la barra reserva su franja arriba solo si esta a la vista (oculta, la app usa toda la pantalla)
+        public bool ReservesTop(Screen scr)
+        {
+            if (scr.DeviceName == targetScreen.DeviceName) return !covered && !full;
+            foreach (var sb in secondaryBars) if (scr.DeviceName == sb.targetScreen.DeviceName) return !sb.covered && !sb.full;
+            return false;
+        }
+
         public void ReRegister()
         {
             if (appBarOn) { Unregister(); }
-            RegisterAppBar(); Redraw(true);
+            if (!covered) RegisterAppBar();
+            Redraw(true);
             foreach (var sb in secondaryBars) sb.ReRegister();
         }
 

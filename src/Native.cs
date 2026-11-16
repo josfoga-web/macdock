@@ -492,6 +492,8 @@ namespace MacDock
 
                 int st;
                 if (SHQueryUserNotificationState(out st) == 0 && (st == 3 || st == 4) && scr.Primary) return true;   // D3D exclusivo o modo presentacion
+                // una ventana maximizada (Brave, Claude...) no es pantalla completa, aunque cubra todo al ocultarse la barra superior
+                if (N.IsZoomed(fg)) return false;
 
                 // 1) "Pantalla completa sin bordes" clasica: el area cliente cubre exactamente este monitor (con tolerancia de 2px de Windows 11).
                 N.RECT c;

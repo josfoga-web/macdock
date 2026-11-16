@@ -259,12 +259,15 @@ namespace MacDock
                 isActive = activeWin;
                 N.RECT fr; if (DwmGetWindowAttribute(h, 9, out fr, 16) != 0) N.GetWindowRect(h, out fr);
                 var scr = Screen.FromHandle(h);
-                if (fr.left <= scr.Bounds.Left && fr.top <= scr.Bounds.Top && fr.right >= scr.Bounds.Right && fr.bottom >= scr.Bounds.Bottom && (N.GetWindowLong(h, -16) & 0x00C00000) != 0x00C00000) { Hide2(); return; }
+                if (!N.IsZoomed(h) && fr.left <= scr.Bounds.Left && fr.top <= scr.Bounds.Top && fr.right >= scr.Bounds.Right && fr.bottom >= scr.Bounds.Bottom && (N.GetWindowLong(h, -16) & 0x00C00000) != 0x00C00000) { Hide2(); return; }
                 float dpi = 1f; try { dpi = N.GetDpiForWindow(h) / 96f; } catch { }
                 s = dpi;
-                N.RECT cb, wr; N.GetWindowRect(h, out wr);
+                N.RECT cb = new N.RECT(), wr; N.GetWindowRect(h, out wr);
                 Rectangle a;
-                bool haveCb = DwmGetWindowAttribute(h, 5, out cb, 16) == 0 && cb.right - cb.left > 30 * dpi;
+                // Chrome, Brave, Edge y apps Electron (Claude, Discord, VS Code) dibujan sus propios botones, mas altos:
+                // ahi se usa su geometria real y no la que reporta Windows
+                bool chromeLike = N.ClassOf(h).StartsWith("Chrome_WidgetWin", StringComparison.Ordinal);
+                bool haveCb = !chromeLike && DwmGetWindowAttribute(h, 5, out cb, 16) == 0 && cb.right - cb.left > 30 * dpi;
                 if (haveCb && MacButtons.MacTitles)
                 {
                     int capTop = Math.Max(fr.top, wr.top + cb.top), capH = Math.Max(20, cb.bottom - cb.top);
@@ -277,7 +280,7 @@ namespace MacDock
                 else
                 {
                     string wc = N.ClassOf(h); bool tall = wc == "WinUIDesktopWin32WindowClass" || wc == "ApplicationFrameWindow";
-                    int w = (int)(138 * dpi), hh = (int)((tall ? 46 : 31) * dpi);
+                    int w = (int)(138 * dpi), hh = (int)((tall ? 46 : chromeLike ? 37 : 31) * dpi);
                     a = new Rectangle(fr.right - w, fr.top + 1, w - 1, hh);
                 }
                 if (a.Width < 40 || a.Height < 14 || fr.right - fr.left < 300) { Hide2(); return; }

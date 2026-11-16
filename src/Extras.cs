@@ -230,6 +230,7 @@ namespace MacDock
                 var shot = Capture(h, frame);
                 if (shot == null) { N.ShowWindow(h, 6); return; }
                 var target = TargetFor(h);
+                ours[h] = DateTime.Now;
                 Remember(h, shot, frame);
                 var fx = new GenieForm(shot, frame, target, false);
                 fx.Shown += (o, e) =>
@@ -279,7 +280,117 @@ namespace MacDock
                 foreach (var k in new List<IntPtr>(shots.Keys)) if (!N.IsIconic(k)) { shots[k].Key.Dispose(); shots.Remove(k); }
         }
 
-        public static void RestoreAnimOnExit() { if (animOff > 0) { animOff = 1; SystemAnim(true); } }
+        public static void RestoreAnimOnExit()
+        {
+            if (animOff > 0) { animOff = 1; SystemAnim(true); }
+            SetGlobal(false);
+            if (hook != IntPtr.Zero) { UnhookWinEvent(hook); hook = IntPtr.Zero; }
+        }
+
+        // ---- todas las minimizaciones del sistema (boton de Windows, Win+abajo, barra propia de la app) ----
+        delegate void WinEventProc(IntPtr hook, uint ev, IntPtr hwnd, int obj, int child, uint thread, uint time);
+        [System.Runtime.InteropServices.DllImport("user32.dll")] static extern IntPtr SetWinEventHook(uint min, uint max, IntPtr mod, WinEventProc proc, uint pid, uint tid, uint flags);
+        [System.Runtime.InteropServices.DllImport("user32.dll")] static extern bool UnhookWinEvent(IntPtr h);
+        [System.Runtime.InteropServices.DllImport("user32.dll")] static extern bool GetWindowPlacement(IntPtr h, ref WINDOWPLACEMENT wp);
+        [System.Runtime.InteropServices.StructLayout(System.Runtime.InteropServices.LayoutKind.Sequential)]
+        struct WINDOWPLACEMENT { public int length, flags, showCmd; public N.POINT ptMin, ptMax; public N.RECT rcNormal; }
+        static WinEventProc proc; static IntPtr hook;
+        static readonly Dictionary<IntPtr, DateTime> ours = new Dictionary<IntPtr, DateTime>();
+        static bool globalOff; static int globalSaved = 1;
+
+        // Mientras MacDock corre, la animacion de minimizar de Windows se apaga (sin guardarlo) para que solo se vea la de Mac
+        public static void SetGlobal(bool macOnly)
+        {
+            var ai = new ANIMATIONINFO { cbSize = 8 };
+            if (macOnly && !globalOff) { SpiAnim(0x48, 8, ref ai, 0); globalSaved = ai.iMinAnimate; ai.iMinAnimate = 0; SpiAnim(0x49, 8, ref ai, 0); globalOff = true; savedAnim = 0; }
+            else if (!macOnly && globalOff) { ai.iMinAnimate = globalSaved; SpiAnim(0x49, 8, ref ai, 0); globalOff = false; savedAnim = globalSaved; }
+        }
+
+        public static void Install()
+        {
+            if (hook == IntPtr.Zero) { proc = OnMinimize; hook = SetWinEventHook(0x0016, 0x0016, IntPtr.Zero, proc, 0, 0, 0x0002); }
+            SetGlobal(Enabled);
+        }
+
+        static void OnMinimize(IntPtr hk, uint ev, IntPtr h, int obj, int child, uint thread, uint time)
+        {
+            try
+            {
+                if (!Enabled || obj != 0 || h == IntPtr.Zero || TargetFor == null) return;
+                DateTime t; if (ours.TryGetValue(h, out t) && (DateTime.Now - t).TotalSeconds < 1.5) return;   // ya animada por MacDock
+                if (!MacButtons.Eligible(h) && (N.GetWindowLong(h, -16) & 0x00C00000) != 0x00C00000) return;
+                // rectangulo que tenia antes de minimizarse (coordenadas de area de trabajo -> pantalla)
+                var wp = new WINDOWPLACEMENT { length = System.Runtime.InteropServices.Marshal.SizeOf(typeof(WINDOWPLACEMENT)) };
+                if (!GetWindowPlacement(h, ref wp)) return;
+                var scr = Screen.FromHandle(h);
+                Rectangle from;
+                if ((wp.flags & 2) != 0) from = scr.WorkingArea;   // estaba maximizada
+                else
+                {
+                    // las coordenadas de area de trabajo se cuentan desde el area de trabajo del monitor principal
+                    var pr = Screen.PrimaryScreen; int ox = pr.WorkingArea.Left - pr.Bounds.Left, oy = pr.WorkingArea.Top - pr.Bounds.Top;
+                    from = new Rectangle(wp.rcNormal.left + ox, wp.rcNormal.top + oy, wp.rcNormal.right - wp.rcNormal.left, wp.rcNormal.bottom - wp.rcNormal.top);
+                }
+                if (from.Width < 60 || from.Height < 60) return;
+                new ScaleFx(h, from, TargetFor(h)).Show();
+            }
+            catch (Exception ex) { Program.Log(ex); }
+        }
+    }
+
+    // Efecto de escala de macOS con la miniatura en vivo que mantiene Windows (DWM): para minimizaciones que no pasan por MacDock
+    class ScaleFx : Form
+    {
+        [System.Runtime.InteropServices.DllImport("dwmapi.dll")] static extern int DwmRegisterThumbnail(IntPtr dest, IntPtr src, out IntPtr thumb);
+        [System.Runtime.InteropServices.DllImport("dwmapi.dll")] static extern int DwmUnregisterThumbnail(IntPtr thumb);
+        [System.Runtime.InteropServices.DllImport("dwmapi.dll")] static extern int DwmUpdateThumbnailProperties(IntPtr thumb, ref THUMBPROPS p);
+        [System.Runtime.InteropServices.StructLayout(System.Runtime.InteropServices.LayoutKind.Sequential)]
+        struct THUMBPROPS { public int dwFlags; public N.RECT rcDestination, rcSource; public byte opacity; public int fVisible, fSourceClientAreaOnly; }
+
+        readonly IntPtr src; readonly Rectangle from, to; IntPtr thumb; VsyncTimer anim; Stopwatch clk = new Stopwatch();
+        const double Dur = 0.34;
+
+        public ScaleFx(IntPtr src, Rectangle from, Rectangle to)
+        {
+            this.src = src; this.from = from; this.to = to;
+            FormBorderStyle = FormBorderStyle.None; ShowInTaskbar = false; StartPosition = FormStartPosition.Manual;
+            BackColor = Color.Black; Bounds = new Rectangle(from.X, from.Y, 1, 1);   // crece cuando la miniatura ya esta lista
+            anim = new VsyncTimer(this); anim.Tick += (o, e) => Frame();
+        }
+
+        protected override CreateParams CreateParams { get { var cp = base.CreateParams; cp.ExStyle |= 0x20 | 0x80 | 0x8000000 | 0x8; return cp; } }
+        protected override bool ShowWithoutActivation { get { return true; } }
+
+        protected override void OnShown(EventArgs e)
+        {
+            base.OnShown(e);
+            if (DwmRegisterThumbnail(Handle, src, out thumb) != 0) { Close(); return; }
+            Update2(0);
+            clk.Start(); anim.Start();
+        }
+
+        void Update2(float t)
+        {
+            float k = 1 - (1 - t) * (1 - t);   // ease-out
+            var r = new Rectangle((int)(from.X + (to.X - from.X) * k), (int)(from.Y + (to.Y - from.Y) * k),
+                Math.Max(2, (int)(from.Width + (to.Width - from.Width) * k)), Math.Max(2, (int)(from.Height + (to.Height - from.Height) * k)));
+            N.SetWindowPos(Handle, new IntPtr(-1), r.X, r.Y, r.Width, r.Height, 0x0010);
+            var p = new THUMBPROPS { dwFlags = 0x1 | 0x4 | 0x8 | 0x10, rcDestination = new N.RECT { left = 0, top = 0, right = r.Width, bottom = r.Height }, opacity = (byte)(255 * (1 - t * 0.35f)), fVisible = 1, fSourceClientAreaOnly = 0 };
+            DwmUpdateThumbnailProperties(thumb, ref p);
+        }
+
+        void Frame()
+        {
+            double p = clk.Elapsed.TotalSeconds / Dur;
+            if (p >= 1) { anim.Stop(); Close(); return; }
+            Update2((float)p);
+        }
+
+        protected override void Dispose(bool disposing)
+        {
+            if (disposing) { anim.Close(); if (thumb != IntPtr.Zero) { DwmUnregisterThumbnail(thumb); thumb = IntPtr.Zero; } }
+            base.Dispose(disposing);
+        }
     }
 
     class GenieForm : Form

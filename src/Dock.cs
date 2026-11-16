@@ -330,6 +330,7 @@ namespace MacDock
             SetTileKeys(cfg.TileKeys);
             global::MacDock.Genie.Enabled = cfg.GenieFx;
             global::MacDock.Genie.TargetFor = GenieTarget;
+            global::MacDock.Genie.Install();
             SetMacButtons(cfg.MacButtons);
             SetDesktopMenu(cfg.DesktopMenu);
             WatchDownloads();
@@ -1945,7 +1946,7 @@ namespace MacDock
             addOpt("Transparencia estilo macOS (menús y paneles)", cfg.Glass, () => { cfg.Glass = !cfg.Glass; cfg.Save(); global::MacDock.Glass.Enabled = cfg.Glass; });
             addOpt("Agitar el mouse para agrandar el puntero", cfg.ShakeCursor, () => { cfg.ShakeCursor = !cfg.ShakeCursor; cfg.Save(); SetShake(cfg.ShakeCursor); });
             addOpt("Atajos para acomodar ventanas (Ctrl+Alt+flechas, F, C)", cfg.TileKeys, () => { cfg.TileKeys = !cfg.TileKeys; cfg.Save(); SetTileKeys(cfg.TileKeys); });
-            addOpt("Efecto genio al minimizar (como macOS)", cfg.GenieFx, () => { cfg.GenieFx = !cfg.GenieFx; cfg.Save(); global::MacDock.Genie.Enabled = cfg.GenieFx; });
+            addOpt("Efecto genio al minimizar (como macOS)", cfg.GenieFx, () => { cfg.GenieFx = !cfg.GenieFx; cfg.Save(); global::MacDock.Genie.Enabled = cfg.GenieFx; global::MacDock.Genie.SetGlobal(cfg.GenieFx); });
             addOpt("Efecto lupa", cfg.Magnify, () => { cfg.Magnify = !cfg.Magnify; cfg.Save(); Relayout(); });
             addOpt("Vista previa de ventanas al pasar el mouse", cfg.WindowPreviews, () => { cfg.WindowPreviews = !cfg.WindowPreviews; cfg.Save(); if (!cfg.WindowPreviews) ClosePreview(); });
             addOpt("Soporte multi-monitor (dock y barra superior)", cfg.MultiMonitor, () =>
@@ -2121,7 +2122,7 @@ namespace MacDock
                 {
                     var b = scr.Bounds;
                     var wa = scr.WorkingArea;
-                    int wantTop = b.Top + (bar != null && (scr.Primary || cfg.MultiMonitor) ? bar.BarHeight : 0);
+                    int wantTop = b.Top + (bar != null && (scr.Primary || cfg.MultiMonitor) && bar.ReservesTop(scr) ? bar.BarHeight : 0);
                     if (wa.Bottom < b.Bottom - 2 || Math.Abs(wa.Top - wantTop) > 4)
                     {
                         var rc = new N.RECT { left = b.Left, top = wantTop, right = b.Right, bottom = b.Bottom };
