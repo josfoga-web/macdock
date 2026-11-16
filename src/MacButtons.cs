@@ -23,6 +23,8 @@ namespace MacDock
 
         WinEventProc proc; IntPtr hookSys, hookObj, hookLoc, hookName; uint hookThreadId;
         public static bool MacTitles = true;   // barra de titulo estilo Mac (puntos a la izquierda, titulo centrado)
+        public static bool StripNative = true; // quitar los botones - [] x de Windows en las ventanas con barra estandar
+        public static readonly HashSet<IntPtr> Stripped = new HashSet<IntPtr>();
         [DllImport("kernel32.dll")] static extern uint GetCurrentThreadId();
         [DllImport("user32.dll")] static extern bool PostThreadMessage(uint tid, int msg, IntPtr w, IntPtr l);
         readonly HashSet<IntPtr> tracked = new HashSet<IntPtr>();      // ventanas con botones (para filtrar rapido en el hilo de eventos)
@@ -171,7 +173,8 @@ namespace MacDock
             if (GetAncestor(h, 2) != h) return "no es ventana principal";
             uint pid; N.GetWindowThreadProcessId(h, out pid); if (pid == MyPid) return "es de MacDock";
             int st = N.GetWindowLong(h, -16), ex = N.GetWindowLong(h, -20);
-            if ((st & 0x20000) == 0 && (st & 0x10000) == 0) return "sin minimizar ni maximizar";
+            bool stripped; lock (Stripped) stripped = Stripped.Contains(h);
+            if (!stripped && (st & 0x20000) == 0 && (st & 0x10000) == 0) return "sin minimizar ni maximizar";
             if ((st & 0x40000) == 0 && (st & 0x00C00000) != 0x00C00000) return "sin borde ni barra de titulo";
             if ((ex & 0x80) != 0) return "ventana de herramientas";
             int cloaked; if (DwmGetWindowAttribute(h, 14, out cloaked, 4) == 0 && cloaked != 0) return "oculta por Windows (cloaked)";
@@ -219,6 +222,36 @@ namespace MacDock
         Timer hoverTimer = new Timer { Interval = 40 };
         int pressedIdx = -1; DateTime greenSince = DateTime.MaxValue;
         public bool MacTitle; int macChecked; string lastTitle = "";
+        int origStyle, capTopOff = -1, capHCached; bool strippedSelf;
+        [DllImport("user32.dll")] static extern int SetWindowLong(IntPtr h, int idx, int v);
+        const int NativeButtons = 0x20000 | 0x10000 | 0x80000;   // minimizar, maximizar y menu de sistema (incluye la X)
+
+        // Windows deja de dibujar - [] x: solo quedan los botones de Mac. Se devuelven al cerrar MacDock.
+        void StripNativeButtons()
+        {
+            if (strippedSelf || !MacButtons.StripNative) return;
+            origStyle = N.GetWindowLong(target, -16);
+            if ((origStyle & NativeButtons) == 0) return;
+            lock (MacButtons.Stripped) MacButtons.Stripped.Add(target);
+            SetWindowLong(target, -16, origStyle & ~NativeButtons);
+            N.SetWindowPos(target, IntPtr.Zero, 0, 0, 0, 0, 0x0001 | 0x0002 | 0x0004 | 0x0010 | 0x0020);   // FRAMECHANGED
+            strippedSelf = true;
+            MacButtons.Diag(target, "botones de Windows quitados");
+        }
+
+        public void RestoreNativeButtons()
+        {
+            if (!strippedSelf) return;
+            strippedSelf = false;
+            lock (MacButtons.Stripped) MacButtons.Stripped.Remove(target);
+            try
+            {
+                int cur = N.GetWindowLong(target, -16);
+                SetWindowLong(target, -16, cur | (origStyle & NativeButtons));
+                N.SetWindowPos(target, IntPtr.Zero, 0, 0, 0, 0, 0x0001 | 0x0002 | 0x0004 | 0x0010 | 0x0020);
+            }
+            catch { }
+        }
         [DllImport("user32.dll")] static extern IntPtr SendMessageTimeout(IntPtr h, int msg, IntPtr w, IntPtr l, int flags, int timeout, out IntPtr res);
         [DllImport("user32.dll")] static extern bool ReleaseCapture();
 
@@ -299,11 +332,13 @@ namespace MacDock
                 // ahi se usa su geometria real y no la que reporta Windows
                 bool chromeLike = N.ClassOf(h).StartsWith("Chrome_WidgetWin", StringComparison.Ordinal);
                 bool haveCb = !chromeLike && DwmGetWindowAttribute(h, 5, out cb, 16) == 0 && cb.right - cb.left > 30 * dpi;
-                if (haveCb && MacButtons.MacTitles)
+                if (MacTitle && (strippedSelf || !haveCb) && capTopOff >= 0)
+                    a = new Rectangle(fr.left + 1, fr.top + capTopOff, fr.right - fr.left - 2, capHCached);
+                else if (haveCb && MacButtons.MacTitles)
                 {
                     int capTop = Math.Max(fr.top, wr.top + cb.top), capH = Math.Max(20, cb.bottom - cb.top);
                     if (macChecked < 3 && !MacTitle) { MacTitle = StandardCaption(fr, capTop, capH, wr.left + cb.left, dpi); macChecked++; }
-                    if (MacTitle) a = new Rectangle(fr.left + 1, capTop, fr.right - fr.left - 2, capH);
+                    if (MacTitle) { a = new Rectangle(fr.left + 1, capTop, fr.right - fr.left - 2, capH); capTopOff = capTop - fr.top; capHCached = capH; }
                     else a = new Rectangle(wr.left + cb.left, capTop, cb.right - cb.left, capH);
                 }
                 else if (haveCb)
@@ -330,6 +365,7 @@ namespace MacDock
                 if (px != 0xFFFFFFFF) bgColor = Color.FromArgb(255, (int)(px & 0xFF), (int)((px >> 8) & 0xFF), (int)((px >> 16) & 0xFF));
                 Render();
                 N.ShowWindow(Handle, 4);
+                if (MacTitle) StripNativeButtons();
             }
             catch (Exception ex) { Program.Log(ex); }
         }
@@ -474,7 +510,7 @@ namespace MacDock
             }
         }
 
-        protected override void OnFormClosing(FormClosingEventArgs e) { hoverTimer.Stop(); base.OnFormClosing(e); }
+        protected override void OnFormClosing(FormClosingEventArgs e) { hoverTimer.Stop(); RestoreNativeButtons(); base.OnFormClosing(e); }
     }
 
     // Panel que aparece al dejar el mouse sobre el boton verde (macOS Sequoia y posteriores):

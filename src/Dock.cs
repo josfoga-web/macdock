@@ -113,6 +113,7 @@ namespace MacDock
         public bool TileKeys = true;
         public bool GenieFx = true;
         public bool Wobbly = true;
+        public int ConfigVer = 0;
         public bool MacTitles = true;
         string path;
 
@@ -153,6 +154,7 @@ namespace MacDock
                 else if (k == "tilekeys") TileKeys = v == "1";
                 else if (k == "geniefx") GenieFx = v == "1";
                 else if (k == "wobbly") Wobbly = v == "1";
+                else if (k == "configver") int.TryParse(v, out ConfigVer);
                 else if (k == "mactitles") MacTitles = v == "1";
                 else if (k == "devicemode" && int.TryParse(v, out i)) DeviceMode = Math.Max(0, Math.Min(2, i));
                 else if (k == "gamingmode") GamingMode = v == "1";
@@ -199,6 +201,7 @@ namespace MacDock
                     "TileKeys=" + (TileKeys ? 1 : 0) + "\r\n" +
                     "GenieFx=" + (GenieFx ? 1 : 0) + "\r\n" +
                     "Wobbly=" + (Wobbly ? 1 : 0) + "\r\n" +
+                    "ConfigVer=" + ConfigVer + "\r\n" +
                     "MacTitles=" + (MacTitles ? 1 : 0) + "\r\n" +
                     "DeviceMode=" + DeviceMode + "\r\n" +
                     "GamingMode=" + (GamingMode ? 1 : 0) + "\r\n" +
@@ -970,6 +973,8 @@ namespace MacDock
             appsDir = Path.Combine(Program.DataDir, "Apps");
             orderFile = Path.Combine(Program.DataDir, "order.txt");
             cfg = new Config(Path.Combine(Program.DataDir, "config.ini"));
+            // al actualizar: los botones de Mac y la barra estilo Mac quedan activados aunque una version anterior los apagara
+            if (cfg.ConfigVer < 3) { cfg.MacButtons = true; cfg.MacTitles = true; cfg.ConfigVer = 3; cfg.Save(); }
             appBarMsg = N.RegisterWindowMessage("MacDockAppBarMsg");
             taskbarCreatedMsg = N.RegisterWindowMessage("TaskbarCreated");
             fast = new VsyncTimer(this); fast.Tick += FastTick;
@@ -1953,7 +1958,13 @@ namespace MacDock
             addOpt("Atajos para acomodar ventanas (Ctrl+Alt+flechas, F, C)", cfg.TileKeys, () => { cfg.TileKeys = !cfg.TileKeys; cfg.Save(); SetTileKeys(cfg.TileKeys); });
             addOpt("Ventanas gelatina al moverlas (ondulación)", cfg.Wobbly, () => { cfg.Wobbly = !cfg.Wobbly; cfg.Save(); global::MacDock.Wobbly.Enabled = cfg.Wobbly; });
             addOpt("Efecto genio al minimizar (como macOS)", cfg.GenieFx, () => { cfg.GenieFx = !cfg.GenieFx; cfg.Save(); global::MacDock.Genie.Enabled = cfg.GenieFx; global::MacDock.Genie.SetGlobal(cfg.GenieFx); });
-            addOpt("Diagnóstico de botones (abrir registro)", false, () => { if (File.Exists(global::MacDock.MacButtons.LogFile)) Process.Start("notepad.exe", "\"" + global::MacDock.MacButtons.LogFile + "\""); else MessageBox.Show("Todavia no hay registro. Activa \"Botones de Mac en todas las ventanas\" y abre algunas apps.", "MacDock"); });
+            addOpt("Diagnóstico de botones (abrir registro)", false, () =>
+            {
+                string err = Path.Combine(Program.DataDir, "error.log");
+                if (File.Exists(global::MacDock.MacButtons.LogFile)) Process.Start("notepad.exe", "\"" + global::MacDock.MacButtons.LogFile + "\"");
+                else MessageBox.Show("No hay registro de botones: la funcion no se esta ejecutando. Revisa que \"Botones de Mac en todas las ventanas\" este marcado.", "MacDock");
+                if (File.Exists(err)) Process.Start("notepad.exe", "\"" + err + "\"");
+            });
             var desk = new ToolStripMenuItem("Escritorio estilo Mac");
             Action<string, Action> addDesk = (txt, act) => { var mi = new ToolStripMenuItem(txt); mi.Click += (o, e) => { try { act(); } catch (Exception ex) { Program.Log(ex); } }; desk.DropDownItems.Add(mi); };
             if (!global::MacDock.DesktopStyle.Applied)

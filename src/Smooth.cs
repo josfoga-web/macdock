@@ -113,6 +113,20 @@ namespace MacDock
             finally { N.ReleaseDC(IntPtr.Zero, screen); }
         }
 
+        // envia solo una parte del lienzo (src, en coordenadas del lienzo) y coloca la ventana en (x, y) de pantalla
+        public void PushRegion(IntPtr hwnd, int x, int y, Rectangle src)
+        {
+            IntPtr screen = N.GetDC(IntPtr.Zero);
+            try
+            {
+                var size = new N.SIZE { cx = Math.Max(1, src.Width), cy = Math.Max(1, src.Height) };
+                var sp = new N.POINT { x = src.X, y = src.Y }; var dst = new N.POINT { x = x, y = y };
+                var blend = new N.BLENDFUNCTION { BlendOp = 0, BlendFlags = 0, SourceConstantAlpha = 255, AlphaFormat = 1 };
+                N.UpdateLayeredWindow(hwnd, screen, ref dst, ref size, memDc, ref sp, 0, ref blend, 2);
+            }
+            finally { N.ReleaseDC(IntPtr.Zero, screen); }
+        }
+
         public void Dispose()
         {
             Bitmap.Dispose();

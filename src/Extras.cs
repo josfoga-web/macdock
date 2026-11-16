@@ -186,7 +186,8 @@ namespace MacDock
             return Rectangle.FromLTRB(r.left, r.top, r.right, r.bottom);
         }
 
-        internal static Bitmap Capture(IntPtr h, Rectangle frame)
+        internal static Bitmap Capture(IntPtr h, Rectangle frame) { return Capture(h, frame, 1100); }
+        internal static Bitmap Capture(IntPtr h, Rectangle frame, int maxSide)
         {
             N.RECT wr; N.GetWindowRect(h, out wr);
             int w = wr.right - wr.left, hh = wr.bottom - wr.top;
@@ -203,7 +204,7 @@ namespace MacDock
                 // solo la parte visible (sin los bordes invisibles de Windows 11), reducida para animar rapido
                 var crop = new Rectangle(frame.Left - wr.left, frame.Top - wr.top, frame.Width, frame.Height);
                 crop.Intersect(new Rectangle(0, 0, w, hh));
-                float k = Math.Min(1f, 1100f / Math.Max(crop.Width, crop.Height));
+                float k = Math.Min(1f, maxSide / (float)Math.Max(crop.Width, crop.Height));
                 var b = new Bitmap(Math.Max(1, (int)(crop.Width * k)), Math.Max(1, (int)(crop.Height * k)), System.Drawing.Imaging.PixelFormat.Format32bppPArgb);
                 using (var g = Graphics.FromImage(b))
                 {
@@ -658,8 +659,11 @@ namespace MacDock
             int st = N.GetWindowLong(h, -16);
             if ((st & 0x00C00000) != 0x00C00000 && (st & 0x00040000) == 0) return;
             pending = h; pendingFrame = Genie.Frame(h);
+            if (preShot != null) { preShot.Dispose(); preShot = null; }
+            if ((N.GetWindowLong(h, -20) & 0x80000) == 0) preShot = Genie.Capture(h, pendingFrame, 3000);
             if (pendingTimer != null) pendingTimer.Start();
         }
+        static Bitmap preShot;
 
         public static void EndExternal(IntPtr h)
         {
@@ -683,7 +687,8 @@ namespace MacDock
         {
             int ex = N.GetWindowLong(h, -20);
             if ((ex & 0x80000) != 0) return;   // ya es transparente por su cuenta: no se toca
-            var shot = Genie.Capture(h, frame);
+            var shot = preShot; preShot = null;
+            if (shot == null) shot = Genie.Capture(h, frame, 3000);
             if (shot == null) return;
             float k = shot.Width / (float)frame.Width;
             // la barra estilo Mac de MacDock se pinta en la captura (si no, se verian los botones de Windows)
@@ -814,32 +819,38 @@ namespace MacDock
             return new PointF(top + (bot - top) * fy, topY + (botY - topY) * fy);
         }
 
+        Rectangle prevBox = Rectangle.Empty;
+
+        // Rapido: la ventana se dibuja en filas finas, cada una desplazada y estirada segun la malla (copia casi 1:1),
+        // y solo se limpia y se envia a la pantalla el rectangulo que ocupa
         void Draw(Point origin)
         {
             int cx = origin.X - margin, cy = origin.Y - margin;
+            float minX = float.MaxValue, minY = float.MaxValue, maxX = float.MinValue, maxY = float.MinValue;
+            foreach (var p in pos) { minX = Math.Min(minX, p.X); minY = Math.Min(minY, p.Y); maxX = Math.Max(maxX, p.X); maxY = Math.Max(maxY, p.Y); }
+            var box = Rectangle.FromLTRB((int)Math.Floor(minX) - cx - 2, (int)Math.Floor(minY) - cy - 2, (int)Math.Ceiling(maxX) - cx + 3, (int)Math.Ceiling(maxY) - cy + 3);
+            box.Intersect(new Rectangle(0, 0, canvas.Width, canvas.Height));
             using (var g = Graphics.FromImage(canvas.Bitmap))
             {
-                g.Clear(Color.Transparent);
-                g.InterpolationMode = System.Drawing.Drawing2D.InterpolationMode.Bilinear;
+                g.CompositingMode = System.Drawing.Drawing2D.CompositingMode.SourceCopy;
+                var dirty = prevBox.IsEmpty ? box : Rectangle.Union(prevBox, box);
+                using (var clear = new SolidBrush(Color.Transparent)) g.FillRectangle(clear, dirty);
+                g.InterpolationMode = System.Drawing.Drawing2D.InterpolationMode.NearestNeighbor;
                 g.PixelOffsetMode = System.Drawing.Drawing2D.PixelOffsetMode.Half;
                 g.CompositingQuality = System.Drawing.Drawing2D.CompositingQuality.HighSpeed;
-                float sw = img.Width / (float)TX, sh = img.Height / (float)TY;
-                for (int j = 0; j < TY; j++)
-                    for (int i = 0; i < TX; i++)
-                    {
-                        float u0 = i / (float)TX, v0 = j / (float)TY, u1 = (i + 1) / (float)TX, v1 = (j + 1) / (float)TY;
-                        PointF p00 = At(u0, v0), p10 = At(u1, v0), p01 = At(u0, v1);
-                        // se agranda cada pieza medio pixel para que no queden rendijas entre ellas
-                        float ex = 0.7f;
-                        var dx = new PointF(p10.X - p00.X, p10.Y - p00.Y); var dy = new PointF(p01.X - p00.X, p01.Y - p00.Y);
-                        float lx = Math.Max(1f, (float)Math.Sqrt(dx.X * dx.X + dx.Y * dx.Y)), ly = Math.Max(1f, (float)Math.Sqrt(dy.X * dy.X + dy.Y * dy.Y));
-                        var q00 = new PointF(p00.X - cx, p00.Y - cy);
-                        var q10 = new PointF(q00.X + dx.X * (1 + ex / lx), q00.Y + dx.Y * (1 + ex / lx));
-                        var q01 = new PointF(q00.X + dy.X * (1 + ex / ly), q00.Y + dy.Y * (1 + ex / ly));
-                        g.DrawImage(img, new[] { q00, q10, q01 }, new RectangleF(i * sw, j * sh, sw, sh), GraphicsUnit.Pixel);
-                    }
+                float k = img.Height / (float)H;
+                const int Row = 3;
+                for (int y = 0; y < H; y += Row)
+                {
+                    int rh = Math.Min(Row, H - y);
+                    float v0 = y / (float)H, v1 = (y + rh) / (float)H, vm = (v0 + v1) / 2;
+                    PointF l = At(0, vm), r = At(1, vm);
+                    float y0 = (At(0, v0).Y + At(1, v0).Y) / 2 - cy, y1 = (At(0, v1).Y + At(1, v1).Y) / 2 - cy;
+                    g.DrawImage(img, new RectangleF(l.X - cx, y0, r.X - l.X, Math.Max(1f, y1 - y0) + 0.75f), new RectangleF(0, y * k, img.Width, rh * k), GraphicsUnit.Pixel);
+                }
             }
-            canvas.Push(Handle, cx, cy);
+            prevBox = box;
+            canvas.PushRegion(Handle, cx + box.X, cy + box.Y, box);
         }
 
         public void Finish(bool now)
