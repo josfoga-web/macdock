@@ -339,6 +339,17 @@ namespace MacDock
             global::MacDock.Genie.Install();
             global::MacDock.Wobbly.Enabled = cfg.Wobbly;
             global::MacDock.Wobbly.Install();
+            global::MacDock.Wobbly.AvoidRects = () =>
+            {
+                var list = new List<Rectangle>();
+                if (DockShown && all.Count > 0)
+                {
+                    float left = winX + all[0].X - PadX, right = winX + all[all.Count - 1].X + all[all.Count - 1].W + PadX;
+                    list.Add(Rectangle.FromLTRB((int)left, (int)(winY + SlidePx + BarTop - Ic * (MaxMag - 1f)), (int)right, winY + H));
+                }
+                if (bar != null) foreach (var sc in Screen.AllScreens) list.Add(new Rectangle(sc.Bounds.Left, sc.Bounds.Top, sc.Bounds.Width, bar.BarHeight));
+                return list.ToArray();
+            };
             SetMacButtons(cfg.MacButtons);
             SetDesktopMenu(cfg.DesktopMenu);
             WatchDownloads();

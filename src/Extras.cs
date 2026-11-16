@@ -624,37 +624,45 @@ namespace MacDock
 
 namespace MacDock
 {
-    // Ventanas "gelatina" al moverlas (como los wobbly windows de KDE/Compiz): mientras se mueve la ventana se muestra
-    // una captura sobre una malla de resortes; el punto agarrado sigue al puntero y el resto se retrasa y rebota.
-    // La ventana real se mueve igual (invisible) y reaparece al asentarse. Funciona con cualquier forma de arrastrar.
+    // Ventanas "gelatina" al moverlas (como los wobbly windows de KDE/Compiz).
+    // Diseno pensado para que no haya tirones ni parpadeos:
+    //  - la captura se copia de la pantalla (no se le pide a la app que se dibuje, asi no se congela su arrastre)
+    //  - MacDock toma el arrastre y la ventana real se aparta fuera de la vista (sin cambiarle la transparencia,
+    //    que obligaba a Windows a recrearla); vuelve a su sitio al terminar, ya pintada
+    //  - el dibujo va en un hilo propio al ritmo de la pantalla, con copia de pixeles exacta (sin rendijas)
     static class Wobbly
     {
         delegate void WinEventProc(IntPtr hook, uint ev, IntPtr hwnd, int obj, int child, uint thread, uint time);
         [System.Runtime.InteropServices.DllImport("user32.dll")] static extern IntPtr SetWinEventHook(uint min, uint max, IntPtr mod, WinEventProc proc, uint pid, uint tid, uint flags);
         [System.Runtime.InteropServices.DllImport("user32.dll")] static extern bool UnhookWinEvent(IntPtr h);
-        [System.Runtime.InteropServices.DllImport("user32.dll")] static extern int SetWindowLong(IntPtr h, int idx, int v);
-        [System.Runtime.InteropServices.DllImport("user32.dll")] static extern bool SetLayeredWindowAttributes(IntPtr h, uint key, byte alpha, uint flags);
-        [System.Runtime.InteropServices.DllImport("user32.dll")] static extern bool RedrawWindow(IntPtr h, IntPtr rc, IntPtr rgn, uint flags);
         [System.Runtime.InteropServices.DllImport("user32.dll")] static extern short GetAsyncKeyState(int vk);
+        [System.Runtime.InteropServices.DllImport("user32.dll")] static extern bool PostMessage(IntPtr h, int msg, IntPtr w, IntPtr l);
+        [System.Runtime.InteropServices.DllImport("user32.dll")] static extern bool PrintWindow(IntPtr h, IntPtr hdc, uint flags);
 
         public static bool Enabled = true;
+        public static Func<Rectangle[]> AvoidRects;   // lo conecta el dock: zonas de MacDock que no deben salir en la captura
         static WinEventProc proc; static IntPtr hook;
-        static IntPtr pending; static Rectangle pendingFrame;   // movimiento iniciado, la gelatina arranca con el primer desplazamiento
-        static System.Windows.Forms.Timer pendingTimer;
+        static IntPtr pending; static Rectangle pendingFrame; static bool pendingOwn; static Point pendingCursor;
+        static Snapshot preShot;
+        static VsyncTimer pendingTimer; static Control helper;
         static WobbleForm cur;
+
+        public sealed class Snapshot { public int[] Px; public int W, H; }
 
         public static void Install()
         {
             if (hook != IntPtr.Zero) return;
+            helper = new Control(); helper.CreateControl();
             proc = OnEvent;
             hook = SetWinEventHook(0x000A, 0x000B, IntPtr.Zero, proc, 0, 0, 0x0002);
-            pendingTimer = new System.Windows.Forms.Timer { Interval = 8 };
+            pendingTimer = new VsyncTimer(helper);   // revisa el primer movimiento en cada refresco (no cada 15 ms)
             pendingTimer.Tick += (o, e) => CheckPending();
         }
 
         public static void Uninstall()
         {
             if (hook != IntPtr.Zero) { UnhookWinEvent(hook); hook = IntPtr.Zero; }
+            if (pendingTimer != null) pendingTimer.Stop();
             if (cur != null) cur.Finish(true);
         }
 
@@ -671,112 +679,154 @@ namespace MacDock
             if (!Enabled || cur != null || N.IsZoomed(h) || N.IsIconic(h)) return;
             int st = N.GetWindowLong(h, -16);
             if (!own && (st & 0x00C00000) != 0x00C00000 && (st & 0x00040000) == 0) return;
-            pending = h; pendingOwn = own; pendingFrame = Genie.Frame(h);
-            if (preShot != null) { preShot.Dispose(); preShot = null; }
-            if ((N.GetWindowLong(h, -20) & 0x80000) == 0) preShot = Genie.Capture(h, pendingFrame, 3000);
-            if (pendingTimer != null) pendingTimer.Start();
+            if ((N.GetWindowLong(h, -20) & 0x80000) != 0) return;   // ya es transparente por su cuenta: no se toca
+            pending = h; pendingOwn = own; pendingFrame = Genie.Frame(h); pendingCursor = Cursor.Position;
+            preShot = Capture(h, pendingFrame);   // antes de que se mueva, y sin bloquear a la app
+            if (preShot == null) { pending = IntPtr.Zero; return; }
+            WobbleForm.Prepare(pendingFrame.Width, pendingFrame.Height);   // lienzo listo antes del primer movimiento
+            pendingTimer.Start();
         }
-        static Bitmap preShot; static bool pendingOwn;
 
         public static void EndExternal(IntPtr h)
         {
-            if (h == pending) { pending = IntPtr.Zero; pendingTimer.Stop(); }
-            if (cur != null && cur.Target == h) cur.Release();
+            if (h == pending) { pending = IntPtr.Zero; pendingTimer.Stop(); preShot = null; }
+            // con el arrastre tomado, el soltar lo detecta MacDock (el fin de arrastre de Windows llega al tomarlo)
         }
+
+        public static bool IsWobbling(IntPtr h) { return cur != null && cur.Target == h && !cur.IsDisposed; }
 
         static void CheckPending()
         {
             if (pending == IntPtr.Zero) { pendingTimer.Stop(); return; }
             int vk = SystemInformation.MouseButtonsSwapped ? 0x02 : 0x01;
-            if ((GetAsyncKeyState(vk) & 0x8000) == 0) { pending = IntPtr.Zero; pendingTimer.Stop(); return; }
+            if ((GetAsyncKeyState(vk) & 0x8000) == 0) { pending = IntPtr.Zero; pendingTimer.Stop(); preShot = null; return; }
             var f = Genie.Frame(pending);
-            if (f.Size != pendingFrame.Size) { pending = IntPtr.Zero; pendingTimer.Stop(); return; }   // es una redimension
-            if (f.Location == pendingFrame.Location) return;
+            if (f.Size != pendingFrame.Size) { pending = IntPtr.Zero; pendingTimer.Stop(); preShot = null; return; }   // es una redimension
+            var c = Cursor.Position;
+            if (f.Location == pendingFrame.Location && Math.Abs(c.X - pendingCursor.X) + Math.Abs(c.Y - pendingCursor.Y) < 3) return;
             var h = pending; pending = IntPtr.Zero; pendingTimer.Stop();
-            Start(h, f, pendingOwn);
+            Start(h, pendingOwn);
         }
 
-        static void Start(IntPtr h, Rectangle frame, bool own)
+        static void Start(IntPtr h, bool own)
         {
-            int ex = N.GetWindowLong(h, -20);
-            if ((ex & 0x80000) != 0) return;   // ya es transparente por su cuenta: no se toca
             var shot = preShot; preShot = null;
-            if (shot == null) shot = Genie.Capture(h, frame, 3000);
             if (shot == null) return;
-            float k = shot.Width / (float)frame.Width;
-            // la barra estilo Mac de MacDock se pinta en la captura (si no, se verian los botones de Windows)
-            var mb = MacButtons.Instance; ButtonOverlay ov = mb != null ? mb.OverlayFor(h) : null;
-            using (var g = Graphics.FromImage(shot))
-            {
-                if (ov != null && ov.Shown) ov.PaintInto(g, (ov.Area.Left - frame.Left) * k, (ov.Area.Top - frame.Top) * k, k);
-                // esquinas redondeadas de Windows 11
-                float rad = 8f * k * (N.GetDpiForWindow(h) / 96f);
-                using (var outside = new System.Drawing.Drawing2D.GraphicsPath())
-                {
-                    outside.AddRectangle(new RectangleF(0, 0, shot.Width, shot.Height));
-                    var r = new RectangleF(0, 0, shot.Width, shot.Height); float d = rad * 2;
-                    outside.AddArc(r.X, r.Y, d, d, 180, 90); outside.AddArc(r.Right - d, r.Y, d, d, 270, 90);
-                    outside.AddArc(r.Right - d, r.Bottom - d, d, d, 0, 90); outside.AddArc(r.X, r.Bottom - d, d, d, 90, 90);
-                    outside.CloseFigure(); outside.FillMode = System.Drawing.Drawing2D.FillMode.Alternate;
-                    g.CompositingMode = System.Drawing.Drawing2D.CompositingMode.SourceCopy;
-                    using (var clear = new SolidBrush(Color.Transparent)) g.FillPath(clear, outside);
-                }
-            }
-            cur = new WobbleForm(h, shot, frame, Cursor.Position, ex, ov, !own);
+            if (own) WindowDrag.Stop();   // el Finder deja de moverse por su cuenta: lo mueve la gelatina
+            else PostMessage(h, 0x001F, IntPtr.Zero, IntPtr.Zero);   // WM_CANCELMODE: MacDock toma el arrastre de Windows
+            // el punto agarrado se mide respecto a la ventana ANTES de moverse (asi el primer cuadro no salta)
+            cur = new WobbleForm(h, shot, pendingFrame, pendingCursor);
             cur.FormClosed += (o, e) => { if (cur == o) cur = null; };
             cur.Show();
-            if (!own)
-            {
-                // MacDock toma el arrastre: Windows deja de mover (y la app de repintar) la ventana en cada pixel
-                PostMessage(h, 0x001F, IntPtr.Zero, IntPtr.Zero);   // WM_CANCELMODE
-                var t = new System.Windows.Forms.Timer { Interval = 60 };
-                t.Tick += (o, e) => { t.Stop(); t.Dispose(); if (cur != null && cur.Target == h) EdgeTiler.BeginExternal(h); };
-                t.Start();
-            }
         }
-        [System.Runtime.InteropServices.DllImport("user32.dll")] static extern bool PostMessage(IntPtr h, int msg, IntPtr w, IntPtr l);
 
-        public static bool IsWobbling(IntPtr h) { return cur != null && cur.Target == h && !cur.IsDisposed; }
-
-        internal static void HideReal(IntPtr h, int ex) { SetWindowLong(h, -20, ex | 0x80000); SetLayeredWindowAttributes(h, 0, 0, 2); }
-        internal static void ShowReal(IntPtr h, int ex) { SetWindowLong(h, -20, ex); RedrawWindow(h, IntPtr.Zero, IntPtr.Zero, 0x0001 | 0x0004 | 0x0080 | 0x0400); }
+        // ---------- captura ----------
+        // Se copia de la pantalla lo que se ve de la ventana: no le envia nada a la app, asi su arrastre no se congela.
+        // Si el dock o la barra de MacDock la tapan, se usa PrintWindow (mas lento, pero sin pedazos del dock).
+        static Snapshot Capture(IntPtr h, Rectangle frame)
+        {
+            if (frame.Width < 60 || frame.Height < 60 || frame.Width > 8000 || frame.Height > 8000) return null;
+            bool covered = false;
+            if (AvoidRects != null) foreach (var r in AvoidRects()) if (r.IntersectsWith(frame)) { covered = true; break; }
+            var vs = SystemInformation.VirtualScreen;
+            if (!vs.Contains(frame)) covered = true;   // parte fuera de la pantalla: la pantalla no la tiene
+            int w = frame.Width, hh = frame.Height;
+            var snap = new Snapshot { W = w, H = hh, Px = new int[w * hh] };
+            using (var bmp = new Bitmap(w, hh, System.Drawing.Imaging.PixelFormat.Format32bppRgb))
+            {
+                try
+                {
+                    using (var g = Graphics.FromImage(bmp))
+                    {
+                        if (!covered) g.CopyFromScreen(frame.Location, Point.Empty, frame.Size, CopyPixelOperation.SourceCopy);
+                        else
+                        {
+                            N.RECT wr; N.GetWindowRect(h, out wr);
+                            IntPtr dc = g.GetHdc();
+                            try
+                            {
+                                using (var full = new Bitmap(wr.right - wr.left, wr.bottom - wr.top, System.Drawing.Imaging.PixelFormat.Format32bppRgb))
+                                {
+                                    g.ReleaseHdc(dc); dc = IntPtr.Zero;
+                                    using (var gf = Graphics.FromImage(full)) { IntPtr fdc = gf.GetHdc(); try { PrintWindow(h, fdc, 2); } finally { gf.ReleaseHdc(fdc); } }
+                                    g.DrawImageUnscaled(full, wr.left - frame.Left, wr.top - frame.Top);
+                                }
+                            }
+                            finally { if (dc != IntPtr.Zero) g.ReleaseHdc(dc); }
+                        }
+                    }
+                }
+                catch (Exception ex) { Program.Log(ex); return null; }
+                var bd = bmp.LockBits(new Rectangle(0, 0, w, hh), System.Drawing.Imaging.ImageLockMode.ReadOnly, System.Drawing.Imaging.PixelFormat.Format32bppRgb);
+                try { for (int y = 0; y < hh; y++) System.Runtime.InteropServices.Marshal.Copy(bd.Scan0 + y * bd.Stride, snap.Px, y * w, w); }
+                finally { bmp.UnlockBits(bd); }
+            }
+            // opaco y con las esquinas redondeadas de Windows 11 recortadas (alfa premultiplicado = 0)
+            int rad = (int)Math.Round(8 * N.GetDpiForWindow(h) / 96f);
+            for (int i = 0; i < snap.Px.Length; i++) snap.Px[i] |= unchecked((int)0xFF000000);
+            for (int y = 0; y < rad; y++)
+                for (int x = 0; x < rad; x++)
+                {
+                    float dx = rad - x - 0.5f, dy = rad - y - 0.5f;
+                    if (dx * dx + dy * dy <= rad * rad) continue;
+                    snap.Px[y * w + x] = 0; snap.Px[y * w + (w - 1 - x)] = 0;
+                    snap.Px[(hh - 1 - y) * w + x] = 0; snap.Px[(hh - 1 - y) * w + (w - 1 - x)] = 0;
+                }
+            return snap;
+        }
     }
 
     class WobbleForm : Form
     {
         [System.Runtime.InteropServices.DllImport("user32.dll")] static extern short GetAsyncKeyState(int vk);
+        [System.Runtime.InteropServices.DllImport("dwmapi.dll")] static extern int DwmFlush();
         public readonly IntPtr Target;
-        readonly Bitmap img; readonly int exStyle; readonly ButtonOverlay overlay;
-        readonly int W, H, NX = 5, NY = 5, TX = 16, TY = 12;
+        readonly int[] src; readonly int srcW, srcH;
+        readonly int W, H, NX = 5, NY = 5;
         readonly PointF[] pos, vel, rest; readonly float[] stiff;
         readonly PointF grab;   // punto agarrado, relativo a la ventana
-        int margin; LayeredCanvas canvas; Stopwatch clk = Stopwatch.StartNew(); double lastT;
+        readonly int margin;
+        readonly Point realHome;   // donde estaba la ventana real antes de apartarla
+        Stopwatch clk = Stopwatch.StartNew(); double lastT;
         volatile bool released, finishing, running;
-        bool hidden;
-        readonly bool takeOver;   // arrastre de Windows tomado por MacDock: la ventana real se reubica pocas veces por segundo
-        System.Threading.Thread th; double lastMove; Point releasePos;
-        [System.Runtime.InteropServices.DllImport("dwmapi.dll")] static extern int DwmFlush();
+        volatile bool parked; double lastPark; System.Threading.Thread th; Point releasePos;
+        Rectangle prevBox = Rectangle.Empty; bool columns;
 
-        public WobbleForm(IntPtr target, Bitmap img, Rectangle frame, Point cursor, int exStyle, ButtonOverlay overlay, bool takeOver)
+        // lienzo y memoria compartidos entre arrastres (crearlos al vuelo causaba una pausa al empezar)
+        static LayeredCanvas canvas; static int[] buf;
+        public static int MarginFor(int w, int h) { return (int)Math.Min(380, Math.Max(120, Math.Max(w, h) * 0.3f)); }
+        public static void Prepare(int w, int h)
         {
-            Target = target; this.img = img; this.exStyle = exStyle; this.overlay = overlay; this.takeOver = takeOver;
-            W = frame.Width; H = frame.Height;
-            margin = (int)Math.Min(380, Math.Max(120, Math.Max(W, H) * 0.3f));
+            int m = MarginFor(w, h), cw = w + m * 2, ch = h + m * 2;
+            if (canvas != null && canvas.Width >= cw && canvas.Height >= ch) return;
+            int nw = Math.Max(cw, canvas != null ? canvas.Width : 0), nh = Math.Max(ch, canvas != null ? canvas.Height : 0);
+            if (canvas != null) canvas.Dispose();
+            canvas = new LayeredCanvas(nw, nh); buf = new int[nw * nh];
+        }
+
+        public WobbleForm(IntPtr target, Wobbly.Snapshot shot, Rectangle frame, Point cursor)
+        {
+            Target = target; src = shot.Px; srcW = shot.W; srcH = shot.H;
+            W = frame.Width; H = frame.Height; margin = MarginFor(W, H);
+            Prepare(W, H);
             grab = new PointF(Math.Max(0, Math.Min(W, cursor.X - frame.Left)), Math.Max(0, Math.Min(H, cursor.Y - frame.Top)));
+            N.RECT wr; N.GetWindowRect(target, out wr); realHome = new Point(wr.left, wr.top);
             int n = NX * NY; pos = new PointF[n]; vel = new PointF[n]; rest = new PointF[n]; stiff = new float[n];
             float diag = (float)Math.Sqrt(W * W + H * H);
+            // el primer cuadro ya parte de donde esta el puntero ahora (sin salto)
+            var c = Cursor.Position; float ox = c.X - grab.X, oy = c.Y - grab.Y;
             for (int j = 0; j < NY; j++)
                 for (int i = 0; i < NX; i++)
                 {
                     int id = j * NX + i;
                     rest[id] = new PointF(i * W / (float)(NX - 1), j * H / (float)(NY - 1));
-                    pos[id] = new PointF(frame.Left + rest[id].X, frame.Top + rest[id].Y);
+                    pos[id] = new PointF(ox + rest[id].X, oy + rest[id].Y);
                     float d = (float)Math.Sqrt((rest[id].X - grab.X) * (rest[id].X - grab.X) + (rest[id].Y - grab.Y) * (rest[id].Y - grab.Y)) / diag;
                     float f = 1 - Math.Min(1, d * 1.25f);
                     stiff[id] = 140f + 1300f * f * f;   // cerca del agarre: rigido; lejos: muy blando (se arrastra y rebota)
                 }
             FormBorderStyle = FormBorderStyle.None; ShowInTaskbar = false; StartPosition = FormStartPosition.Manual;
-            Bounds = new Rectangle(frame.Left - margin, frame.Top - margin, W + margin * 2, H + margin * 2);
+            Bounds = new Rectangle((int)ox - margin, (int)oy - margin, 1, 1);
         }
 
         protected override CreateParams CreateParams { get { var cp = base.CreateParams; cp.ExStyle |= 0x80000 | 0x20 | 0x80 | 0x8000000 | 0x8; return cp; } }
@@ -785,14 +835,11 @@ namespace MacDock
         protected override void OnShown(EventArgs e)
         {
             base.OnShown(e);
-            canvas = new LayeredCanvas(W + margin * 2, H + margin * 2);
-            var f = Genie.Frame(Target);
-            Draw(f.Location);
-            // la captura ya cubre la ventana: ahora se oculta la real (y su barra Mac)
-            Wobbly.HideReal(Target, exStyle); hidden = true;
-            if (overlay != null && !overlay.IsDisposed) overlay.Hide2();
+            var c = Cursor.Position;
+            Draw(new Point((int)(c.X - grab.X), (int)(c.Y - grab.Y)));
+            N.SetWindowPos(Handle, new IntPtr(-1), 0, 0, 0, 0, 0x0001 | 0x0002 | 0x0010);
+            Park();   // la captura ya cubre la ventana: la real se aparta
             lastT = clk.Elapsed.TotalSeconds;
-            // hilo de dibujo propio, al ritmo de la pantalla: no depende del hilo principal de MacDock
             running = true;
             th = new System.Threading.Thread(() =>
             {
@@ -808,18 +855,35 @@ namespace MacDock
             th.Start();
         }
 
-        // el fin de la gelatina se hace en el hilo principal
-        void EndOnUi(bool now) { try { BeginInvoke(new Action(() => Finish(now))); } catch { } }
+        // La ventana real se aparta fuera de todas las pantallas (Windows conserva su imagen, asi al volver no hay que repintarla)
+        void Park()
+        {
+            var vs = SystemInformation.VirtualScreen;
+            N.SetWindowPos(Target, IntPtr.Zero, vs.Left - W - 200, vs.Top, 0, 0, 0x0001 | 0x0004 | 0x0010 | 0x0200 | 0x4000);
+            parked = true;
+        }
 
-        public void Release() { if (!takeOver) released = true; }   // con el arrastre tomado, el soltar lo detecta MacDock
+        // devuelve la ventana real a una posicion (esquina visible de la ventana = p)
+        void Unpark(Point p, bool async)
+        {
+            N.RECT wr; N.GetWindowRect(Target, out wr);
+            var fr = Genie.Frame(Target);
+            int offX = fr.Left - wr.left, offY = fr.Top - wr.top;   // bordes invisibles de Windows 11
+            N.SetWindowPos(Target, IntPtr.Zero, p.X - offX, p.Y - offY, 0, 0, 0x0001 | 0x0004 | 0x0010 | 0x0200 | (async ? 0x4000 : 0));
+            parked = false;
+        }
+
+        void EndOnUi(bool now) { try { BeginInvoke(new Action(() => Finish(now))); } catch { } }
 
         void Frame()
         {
             if (finishing) return;
             double now = clk.Elapsed.TotalSeconds; float dt = (float)Math.Min(0.034, now - lastT); lastT = now;
-            if (!N.IsWindowVisible(Target) || N.IsIconic(Target)) { running = false; EndOnUi(true); return; }
+            if (!N.IsWindow(Target) || N.IsIconic(Target)) { running = false; EndOnUi(true); return; }
             var real = Genie.Frame(Target);
-            if (real.Width != W || real.Height != H) { running = false; EndOnUi(true); return; }   // se redimensiono o se acomodo
+            if (real.Width != W || real.Height != H) { running = false; EndOnUi(true); return; }   // la redimensionaron
+            // si el arrastre de Windows tardo en soltarse y devolvio la ventana real a la vista, se aparta otra vez
+            if (parked && !released && now - lastPark > 0.05 && SystemInformation.VirtualScreen.IntersectsWith(real)) { lastPark = now; Park(); }
             var cpos = Cursor.Position;
             if (!released)
             {
@@ -827,19 +891,19 @@ namespace MacDock
                 if ((GetAsyncKeyState(vk) & 0x8000) == 0)
                 {
                     released = true;
-                    if (takeOver)
+                    releasePos = new Point((int)(cpos.X - grab.X), (int)(cpos.Y - grab.Y));
+                    if (EdgeTiler.Zone != 0)
                     {
-                        // al soltar, la ventana real queda exactamente donde la dejaste, y se revisan los bordes (acomodo)
-                        releasePos = new Point((int)(cpos.X - grab.X), (int)(cpos.Y - grab.Y));
-                        MoveReal(releasePos, false);
-                        var h0 = Target; try { BeginInvoke(new Action(() => EdgeTiler.EndExternal(h0))); } catch { }
+                        // va a acomodarse en un borde: la ventana real vuelve y el acomodo la anima desde aqui
+                        Unpark(releasePos, false);
+                        var h0 = Target; try { BeginInvoke(new Action(() => { EdgeTiler.EndExternal(h0); Finish(true); })); } catch { }
+                        running = false; return;
                     }
+                    var h1 = Target; try { BeginInvoke(new Action(() => EdgeTiler.EndExternal(h1))); } catch { }
                 }
-                else if (takeOver && now - lastMove > 0.08) { lastMove = now; MoveReal(new Point((int)(cpos.X - grab.X), (int)(cpos.Y - grab.Y)), true); }
             }
-            var f = !released ? new Rectangle((int)(cpos.X - grab.X), (int)(cpos.Y - grab.Y), W, H)
-                  : takeOver ? new Rectangle(releasePos, new Size(W, H)) : real;
-            // fisica: cada nodo es atraido a su lugar en la ventana real con un resorte poco amortiguado
+            var f = released ? new Rectangle(releasePos, new Size(W, H)) : new Rectangle((int)(cpos.X - grab.X), (int)(cpos.Y - grab.Y), W, H);
+            // fisica: cada nodo es atraido a su lugar con un resorte poco amortiguado
             int steps = Math.Max(1, (int)Math.Ceiling(dt / 0.004f)); float h = dt / steps;
             float maxOff = 0, maxV = 0;
             for (int s = 0; s < steps; s++)
@@ -849,7 +913,6 @@ namespace MacDock
                     float ax = k * (tx - pos[id].X) - c * vel[id].X, ay = k * (ty - pos[id].Y) - c * vel[id].Y;
                     vel[id] = new PointF(vel[id].X + ax * h, vel[id].Y + ay * h);
                     float px = pos[id].X + vel[id].X * h, py = pos[id].Y + vel[id].Y * h;
-                    // sin salirse del lienzo
                     px = Math.Max(tx - margin + 2, Math.Min(tx + margin - 2, px)); py = Math.Max(ty - margin + 2, Math.Min(ty + margin - 2, py));
                     pos[id] = new PointF(px, py);
                 }
@@ -859,17 +922,13 @@ namespace MacDock
                 maxOff = Math.Max(maxOff, Math.Max(ox, oy)); maxV = Math.Max(maxV, Math.Max(Math.Abs(vel[id].X), Math.Abs(vel[id].Y)));
             }
             Draw(f.Location);
-            if (released && maxOff < 0.6f && maxV < 12f) { running = false; EndOnUi(false); }
-        }
-
-        // reubica la ventana real (invisible) sin esperar a la app
-        void MoveReal(Point topLeftOfFrame, bool async)
-        {
-            N.RECT wr; N.GetWindowRect(Target, out wr);
-            var fr = Genie.Frame(Target);
-            int dx = topLeftOfFrame.X - fr.Left, dy = topLeftOfFrame.Y - fr.Top;
-            if (dx == 0 && dy == 0) return;
-            N.SetWindowPos(Target, IntPtr.Zero, wr.left + dx, wr.top + dy, 0, 0, 0x0001 | 0x0004 | 0x0010 | 0x0200 | (async ? 0x4000 : 0));
+            if (released && maxOff < 0.6f && maxV < 12f)
+            {
+                // asentada: la ventana real vuelve exactamente aqui (ya tiene su imagen) y en el siguiente refresco se quita la captura
+                Unpark(releasePos, false);
+                DwmFlush();
+                running = false; EndOnUi(false);
+            }
         }
 
         // posicion de un punto de la ventana (u,v en 0..1) interpolando la malla
@@ -884,28 +943,11 @@ namespace MacDock
             return new PointF(top + (bot - top) * fy, topY + (botY - topY) * fy);
         }
 
-        Rectangle prevBox = Rectangle.Empty;
-        bool columns;   // dibujar en columnas (arrastre vertical) en vez de filas
-        readonly System.Drawing.Imaging.ImageAttributes edgeClamp = MakeClamp();
-        static System.Drawing.Imaging.ImageAttributes MakeClamp() { var a = new System.Drawing.Imaging.ImageAttributes(); a.SetWrapMode(System.Drawing.Drawing2D.WrapMode.TileFlipXY); return a; }
-
-        // Rapido: la ventana se dibuja en filas finas, cada una desplazada y estirada segun la malla (copia casi 1:1),
-        // y solo se limpia y se envia a la pantalla el rectangulo que ocupa
-        int[] src, buf; int srcW, srcH;
-
-        // Copia de pixeles propia (sin GDI+): cada pixel del lienzo se calcula una vez con aritmetica entera exacta,
-        // asi no hay suavizado de bordes, ni muestreos raros, ni rendijas entre franjas. Se escribe solo el rectangulo ocupado.
+        // Copia de pixeles propia: cada pixel se calcula una vez con aritmetica entera exacta, franjas contiguas sin rendijas.
+        // Filas si la ventana se deforma de lado, columnas si se deforma hacia arriba o abajo. Solo se envia el rectangulo ocupado.
         void Draw(Point origin)
         {
             int cx = origin.X - margin, cy = origin.Y - margin, CW = canvas.Width, CH = canvas.Height;
-            if (src == null)
-            {
-                srcW = img.Width; srcH = img.Height; src = new int[srcW * srcH];
-                var bd = img.LockBits(new Rectangle(0, 0, srcW, srcH), System.Drawing.Imaging.ImageLockMode.ReadOnly, System.Drawing.Imaging.PixelFormat.Format32bppPArgb);
-                try { for (int y = 0; y < srcH; y++) System.Runtime.InteropServices.Marshal.Copy(bd.Scan0 + y * bd.Stride, src, y * srcW, srcW); }
-                finally { img.UnlockBits(bd); }
-                buf = new int[CW * CH];
-            }
             float minX = float.MaxValue, minY = float.MaxValue, maxX = float.MinValue, maxY = float.MinValue;
             foreach (var p in pos) { minX = Math.Min(minX, p.X); minY = Math.Min(minY, p.Y); maxX = Math.Max(maxX, p.X); maxY = Math.Max(maxY, p.Y); }
             var box = Rectangle.FromLTRB((int)Math.Floor(minX) - cx - 2, (int)Math.Floor(minY) - cy - 2, (int)Math.Ceiling(maxX) - cx + 3, (int)Math.Ceiling(maxY) - cy + 3);
@@ -919,7 +961,7 @@ namespace MacDock
             const int Strip = 3;
             int prev = int.MinValue;
             if (!columns)
-                for (int y = 0; y < H; y += Strip)   // filas: se desplazan y estiran a los lados
+                for (int y = 0; y < H; y += Strip)
                 {
                     int rh = Math.Min(Strip, H - y);
                     float v0 = y / (float)H, v1 = (y + rh) / (float)H, vm = (v0 + v1) / 2;
@@ -930,7 +972,7 @@ namespace MacDock
                     Blit(xl, top, xr - xl, bottom - top, 0, y * srcH / H, srcW, Math.Max(1, (y + rh) * srcH / H - y * srcH / H), CW, CH);
                 }
             else
-                for (int x = 0; x < W; x += Strip)   // columnas: se desplazan y estiran hacia arriba y abajo
+                for (int x = 0; x < W; x += Strip)
                 {
                     int cw = Math.Min(Strip, W - x);
                     float u0 = x / (float)W, u1 = (x + cw) / (float)W, um = (u0 + u1) / 2;
@@ -940,7 +982,6 @@ namespace MacDock
                     int yt = (int)Math.Round(At(um, 0).Y - cy), yb = Math.Max(yt + 1, (int)Math.Round(At(um, 1).Y - cy));
                     Blit(left, yt, right - left, yb - yt, x * srcW / W, 0, Math.Max(1, (x + cw) * srcW / W - x * srcW / W), srcH, CW, CH);
                 }
-            // solo las filas del rectangulo tocado pasan a la memoria que lee la pantalla
             IntPtr bits = canvas.Bits;
             for (int y = dirty.Top; y < dirty.Bottom; y++)
                 System.Runtime.InteropServices.Marshal.Copy(buf, y * CW + dirty.Left, bits + (y * CW + dirty.Left) * 4, dirty.Width);
@@ -948,7 +989,6 @@ namespace MacDock
             canvas.PushRegion(Handle, cx + box.X, cy + box.Y, box);
         }
 
-        // copia un rectangulo de la captura (sx,sy,sw,sh) estirado a (dx,dy,dw,dh) con vecino mas cercano en punto fijo
         void Blit(int dx, int dy, int dw, int dh, int sx, int sy, int sw, int sh, int CW, int CH)
         {
             if (dw <= 0 || dh <= 0) return;
@@ -972,18 +1012,24 @@ namespace MacDock
             if (finishing) return;
             finishing = true; running = false;
             if (th != null && th != System.Threading.Thread.CurrentThread) th.Join(200);
-            if (hidden) { Wobbly.ShowReal(Target, exStyle); hidden = false; }
-            var mb = MacButtons.Instance;
-            if (overlay != null && !overlay.IsDisposed && mb != null) overlay.Place(mb.IsActive(Target));
-            // se espera un refresco para que la ventana real ya este pintada antes de quitar la captura
-            var t = new System.Windows.Forms.Timer { Interval = now ? 1 : 30 };
-            t.Tick += (o, e) => { t.Stop(); t.Dispose(); Close(); };
-            t.Start();
+            if (parked)
+            {
+                // terminar de golpe (redimension, salida...): la ventana vuelve donde iba la gelatina o a su sitio
+                var c = Cursor.Position;
+                Unpark(released ? releasePos : new Point((int)(c.X - grab.X), (int)(c.Y - grab.Y)), false);
+            }
+            // limpiar el lienzo compartido para el proximo arrastre
+            if (!prevBox.IsEmpty)
+            {
+                int CW = canvas.Width;
+                for (int y = prevBox.Top; y < prevBox.Bottom; y++) { Array.Clear(buf, y * CW + prevBox.Left, prevBox.Width); System.Runtime.InteropServices.Marshal.Copy(buf, y * CW + prevBox.Left, canvas.Bits + (y * CW + prevBox.Left) * 4, prevBox.Width); }
+            }
+            Close();
         }
 
         protected override void Dispose(bool disposing)
         {
-            if (disposing) { running = false; if (th != null) th.Join(200); if (hidden) Wobbly.ShowReal(Target, exStyle); if (canvas != null) { canvas.Dispose(); canvas = null; } img.Dispose(); }
+            if (disposing) { running = false; if (th != null) th.Join(200); if (parked) Unpark(realHome, false); }
             base.Dispose(disposing);
         }
     }

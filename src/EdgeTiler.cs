@@ -21,6 +21,7 @@ namespace MacDock
 
         static WinEventProc proc; static IntPtr hook;
         static IntPtr dragWnd; static N.RECT startRect; static int zone;
+        public static int Zone { get { return zone; } }   // zona de acomodo activa (0 = ninguna)
         static System.Windows.Forms.Timer track;
         static TilePreview preview;
         static readonly Dictionary<IntPtr, Size> preTile = new Dictionary<IntPtr, Size>();
@@ -60,7 +61,8 @@ namespace MacDock
             try
             {
                 if (obj != 0 || h == IntPtr.Zero) return;
-                if (ev == 0x000A) Begin(h); else End(h);
+                if (ev == 0x000A) Begin(h);
+                else if (!Wobbly.IsWobbling(h)) End(h);   // con la gelatina, el fin real lo avisa ella al soltar
             }
             catch (Exception ex) { Program.Log(ex); }
         }
@@ -110,8 +112,9 @@ namespace MacDock
         {
             if (dragWnd == IntPtr.Zero) { track.Stop(); return; }
             N.RECT r; N.GetWindowRect(dragWnd, out r);
-            bool moved = r.left != startRect.left || r.top != startRect.top;
-            bool sameSize = r.right - r.left == startRect.right - startRect.left && r.bottom - r.top == startRect.bottom - startRect.top;
+            bool wob = Wobbly.IsWobbling(dragWnd);
+            bool moved = wob || r.left != startRect.left || r.top != startRect.top;
+            bool sameSize = wob || r.right - r.left == startRect.right - startRect.left && r.bottom - r.top == startRect.bottom - startRect.top;
             int z = 0;
             if (moved && sameSize)
             {
