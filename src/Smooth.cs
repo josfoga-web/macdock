@@ -82,6 +82,7 @@ namespace MacDock
 
         public readonly int Width, Height;
         public readonly Bitmap Bitmap;
+        public IntPtr Bits { get; private set; }   // memoria de la seccion DIB (32 bpp, filas de arriba abajo)
         IntPtr memDc, hBmp, oldBmp;
 
         public LayeredCanvas(int w, int h)
@@ -96,6 +97,7 @@ namespace MacDock
                 if (hBmp == IntPtr.Zero) throw new OutOfMemoryException("CreateDIBSection");
                 oldBmp = N.SelectObject(memDc, hBmp);
                 Bitmap = new Bitmap(w, h, w * 4, PixelFormat.Format32bppPArgb, bits);
+                Bits = bits;
             }
             finally { N.ReleaseDC(IntPtr.Zero, screen); }
         }

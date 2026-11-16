@@ -818,7 +818,7 @@ namespace MacDock
         {
             var lpp = LightsPos; int li = TrafficLights.Hit(e.Location, lpp.X, lpp.Y, s);
             if (li == 0) { Close(); return; }
-            if (li == 1) { WindowState = FormWindowState.Minimized; return; }
+            if (li == 1) { Genie.Minimize(Handle); return; }   // efecto genio hacia el dock, como macOS
             if (li == 2) { Borderless.ToggleMax(this); return; }
             if (rBack.Contains(e.Location)) GoBack();
             else if (rFwd.Contains(e.Location)) GoFwd();

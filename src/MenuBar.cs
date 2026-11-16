@@ -233,11 +233,11 @@ namespace MacDock
                     {
                         // izquierda: logo + app activa + menu Ventana (macOS Sequoia) + titulo
                         float x = 14 * s;
-                        float lq = 5.5f * s, lg = 1.4f * s, ly = cy - lq - lg / 2;
-                        rLogo = new RectangleF(x - 8 * s, 0, lq * 2 + lg + 16 * s, H);
-                        g.FillRectangle(fgB, x, ly, lq, lq); g.FillRectangle(fgB, x + lq + lg, ly, lq, lq);
-                        g.FillRectangle(fgB, x, ly + lq + lg, lq, lq); g.FillRectangle(fgB, x + lq + lg, ly + lq + lg, lq, lq);
-                        x += lq * 2 + lg + 20 * s;
+                        // logo minimalista estilo Apple: cuadricula de 3x3 puntos redondeados (menu de apps y sistema)
+                        float dot = 3.3f * s, dg = 1.75f * s, side = dot * 3 + dg * 2, ly = cy - side / 2;
+                        rLogo = new RectangleF(x - 8 * s, 0, side + 16 * s, H);
+                        for (int gi = 0; gi < 9; gi++) g.FillEllipse(fgB, x + (gi % 3) * (dot + dg), ly + (gi / 3) * (dot + dg), dot, dot);
+                        x += side + 20 * s;
 
                         var an = g.MeasureString(appName, fBold);
                         rApp = new RectangleF(x - 8 * s, 0, an.Width + 14 * s, H);

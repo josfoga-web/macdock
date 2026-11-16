@@ -136,7 +136,7 @@ namespace MacDock
                 N.GetWindowRect(h, out r);
             }
             EdgeTiler.BeginExternal(h);   // recupera el tamano si estaba acomodada y muestra las zonas al llegar a un borde
-            Wobbly.BeginExternal(h);
+            Wobbly.BeginExternal(h, true);
             N.GetWindowRect(h, out r);
             grab = new Point(c.X - r.left, c.Y - r.top);
             if (comp != IntPtr.Zero) { N.RECT cr; N.GetWindowRect(comp, out cr); compOff = new Point(cr.left - r.left, cr.top - r.top); }
@@ -664,11 +664,13 @@ namespace MacDock
             if (ev == 0x000A) BeginExternal(h); else EndExternal(h);
         }
 
-        public static void BeginExternal(IntPtr h)
+        public static void BeginExternal(IntPtr h) { BeginExternal(h, false); }
+        // own = ventana que MacDock arrastra por su cuenta (su Finder): no hace falta que tenga barra de Windows
+        public static void BeginExternal(IntPtr h, bool own)
         {
             if (!Enabled || cur != null || N.IsZoomed(h) || N.IsIconic(h)) return;
             int st = N.GetWindowLong(h, -16);
-            if ((st & 0x00C00000) != 0x00C00000 && (st & 0x00040000) == 0) return;
+            if (!own && (st & 0x00C00000) != 0x00C00000 && (st & 0x00040000) == 0) return;
             pending = h; pendingFrame = Genie.Frame(h);
             if (preShot != null) { preShot.Dispose(); preShot = null; }
             if ((N.GetWindowLong(h, -20) & 0x80000) == 0) preShot = Genie.Capture(h, pendingFrame, 3000);
@@ -746,7 +748,7 @@ namespace MacDock
         {
             Target = target; this.img = img; this.exStyle = exStyle; this.overlay = overlay;
             W = frame.Width; H = frame.Height;
-            margin = (int)Math.Min(260, Math.Max(90, Math.Max(W, H) * 0.22f));
+            margin = (int)Math.Min(380, Math.Max(120, Math.Max(W, H) * 0.3f));
             grab = new PointF(Math.Max(0, Math.Min(W, cursor.X - frame.Left)), Math.Max(0, Math.Min(H, cursor.Y - frame.Top)));
             int n = NX * NY; pos = new PointF[n]; vel = new PointF[n]; rest = new PointF[n]; stiff = new float[n];
             float diag = (float)Math.Sqrt(W * W + H * H);
@@ -757,8 +759,8 @@ namespace MacDock
                     rest[id] = new PointF(i * W / (float)(NX - 1), j * H / (float)(NY - 1));
                     pos[id] = new PointF(frame.Left + rest[id].X, frame.Top + rest[id].Y);
                     float d = (float)Math.Sqrt((rest[id].X - grab.X) * (rest[id].X - grab.X) + (rest[id].Y - grab.Y) * (rest[id].Y - grab.Y)) / diag;
-                    float f = 1 - Math.Min(1, d * 1.4f);
-                    stiff[id] = 300f + 1500f * f * f;   // cerca del agarre: rigido; lejos: blando (rebota)
+                    float f = 1 - Math.Min(1, d * 1.25f);
+                    stiff[id] = 140f + 1300f * f * f;   // cerca del agarre: rigido; lejos: muy blando (se arrastra y rebota)
                 }
             FormBorderStyle = FormBorderStyle.None; ShowInTaskbar = false; StartPosition = FormStartPosition.Manual;
             Bounds = new Rectangle(frame.Left - margin, frame.Top - margin, W + margin * 2, H + margin * 2);
@@ -788,20 +790,22 @@ namespace MacDock
             if (finishing) return;
             double now = clk.Elapsed.TotalSeconds; float dt = (float)Math.Min(0.034, now - lastT); lastT = now;
             if (!N.IsWindowVisible(Target) || N.IsIconic(Target)) { Finish(true); return; }
-            var f = Genie.Frame(Target);
-            if (f.Width != W || f.Height != H) { Finish(true); return; }   // se redimensiono o se acomodo: fuera la gelatina
+            var real = Genie.Frame(Target);
+            if (real.Width != W || real.Height != H) { Finish(true); return; }   // se redimensiono o se acomodo: fuera la gelatina
             if (!released)
             {
                 int vk = SystemInformation.MouseButtonsSwapped ? 0x02 : 0x01;
                 if ((GetAsyncKeyState(vk) & 0x8000) == 0) released = true;
             }
+            var cpos = Cursor.Position;
+            var f = released ? real : new Rectangle((int)(cpos.X - grab.X), (int)(cpos.Y - grab.Y), W, H);
             // fisica: cada nodo es atraido a su lugar en la ventana real con un resorte poco amortiguado
             int steps = Math.Max(1, (int)Math.Ceiling(dt / 0.004f)); float h = dt / steps;
             float maxOff = 0, maxV = 0;
             for (int s = 0; s < steps; s++)
                 for (int id = 0; id < pos.Length; id++)
                 {
-                    float tx = f.Left + rest[id].X, ty = f.Top + rest[id].Y, k = stiff[id], c = 2f * (float)Math.Sqrt(k) * 0.5f;
+                    float tx = f.Left + rest[id].X, ty = f.Top + rest[id].Y, k = stiff[id], c = 2f * (float)Math.Sqrt(k) * 0.38f;
                     float ax = k * (tx - pos[id].X) - c * vel[id].X, ay = k * (ty - pos[id].Y) - c * vel[id].Y;
                     vel[id] = new PointF(vel[id].X + ax * h, vel[id].Y + ay * h);
                     float px = pos[id].X + vel[id].X * h, py = pos[id].Y + vel[id].Y * h;
@@ -831,47 +835,86 @@ namespace MacDock
         }
 
         Rectangle prevBox = Rectangle.Empty;
+        bool columns;   // dibujar en columnas (arrastre vertical) en vez de filas
         readonly System.Drawing.Imaging.ImageAttributes edgeClamp = MakeClamp();
         static System.Drawing.Imaging.ImageAttributes MakeClamp() { var a = new System.Drawing.Imaging.ImageAttributes(); a.SetWrapMode(System.Drawing.Drawing2D.WrapMode.TileFlipXY); return a; }
 
         // Rapido: la ventana se dibuja en filas finas, cada una desplazada y estirada segun la malla (copia casi 1:1),
         // y solo se limpia y se envia a la pantalla el rectangulo que ocupa
+        int[] src, buf; int srcW, srcH;
+
+        // Copia de pixeles propia (sin GDI+): cada pixel del lienzo se calcula una vez con aritmetica entera exacta,
+        // asi no hay suavizado de bordes, ni muestreos raros, ni rendijas entre franjas. Se escribe solo el rectangulo ocupado.
         void Draw(Point origin)
         {
-            int cx = origin.X - margin, cy = origin.Y - margin;
+            int cx = origin.X - margin, cy = origin.Y - margin, CW = canvas.Width, CH = canvas.Height;
+            if (src == null)
+            {
+                srcW = img.Width; srcH = img.Height; src = new int[srcW * srcH];
+                var bd = img.LockBits(new Rectangle(0, 0, srcW, srcH), System.Drawing.Imaging.ImageLockMode.ReadOnly, System.Drawing.Imaging.PixelFormat.Format32bppPArgb);
+                try { for (int y = 0; y < srcH; y++) System.Runtime.InteropServices.Marshal.Copy(bd.Scan0 + y * bd.Stride, src, y * srcW, srcW); }
+                finally { img.UnlockBits(bd); }
+                buf = new int[CW * CH];
+            }
             float minX = float.MaxValue, minY = float.MaxValue, maxX = float.MinValue, maxY = float.MinValue;
             foreach (var p in pos) { minX = Math.Min(minX, p.X); minY = Math.Min(minY, p.Y); maxX = Math.Max(maxX, p.X); maxY = Math.Max(maxY, p.Y); }
             var box = Rectangle.FromLTRB((int)Math.Floor(minX) - cx - 2, (int)Math.Floor(minY) - cy - 2, (int)Math.Ceiling(maxX) - cx + 3, (int)Math.Ceiling(maxY) - cy + 3);
-            box.Intersect(new Rectangle(0, 0, canvas.Width, canvas.Height));
-            using (var g = Graphics.FromImage(canvas.Bitmap))
-            {
-                g.CompositingMode = System.Drawing.Drawing2D.CompositingMode.SourceCopy;
-                var dirty = prevBox.IsEmpty ? box : Rectangle.Union(prevBox, box);
-                using (var clear = new SolidBrush(Color.Transparent)) g.FillRectangle(clear, dirty);
-                // las filas se pintan encima (no reemplazan): un borde de una fila nunca abre un hueco en la de al lado
-                g.CompositingMode = System.Drawing.Drawing2D.CompositingMode.SourceOver;
-                g.InterpolationMode = System.Drawing.Drawing2D.InterpolationMode.NearestNeighbor;
-                g.PixelOffsetMode = System.Drawing.Drawing2D.PixelOffsetMode.None;
-                g.CompositingQuality = System.Drawing.Drawing2D.CompositingQuality.HighSpeed;
-                float k = img.Height / (float)H;
-                const int Row = 3;
-                // Sin rendijas: cada fila se coloca en pixeles enteros y empieza exactamente donde termino la anterior,
-                // y el borde de la imagen se repite en vez de mezclarse con transparente
-                int prevBottom = int.MinValue;
-                for (int y = 0; y < H; y += Row)
+            box.Intersect(new Rectangle(0, 0, CW, CH));
+            var dirty = prevBox.IsEmpty ? box : Rectangle.Union(prevBox, box);
+            for (int y = dirty.Top; y < dirty.Bottom; y++) Array.Clear(buf, y * CW + dirty.Left, dirty.Width);
+
+            float defX = 0, defY = 0;
+            for (int id = 0; id < pos.Length; id++) { defX += Math.Abs(pos[id].X - (origin.X + rest[id].X)); defY += Math.Abs(pos[id].Y - (origin.Y + rest[id].Y)); }
+            if (columns ? defX > defY * 1.3f : defY > defX * 1.3f) columns = !columns;
+            const int Strip = 3;
+            int prev = int.MinValue;
+            if (!columns)
+                for (int y = 0; y < H; y += Strip)   // filas: se desplazan y estiran a los lados
                 {
-                    int rh = Math.Min(Row, H - y);
+                    int rh = Math.Min(Strip, H - y);
                     float v0 = y / (float)H, v1 = (y + rh) / (float)H, vm = (v0 + v1) / 2;
-                    PointF l = At(0, vm), r = At(1, vm);
-                    int top = prevBottom == int.MinValue ? (int)Math.Round((At(0, v0).Y + At(1, v0).Y) / 2 - cy) : prevBottom;
+                    int top = prev == int.MinValue ? (int)Math.Round((At(0, v0).Y + At(1, v0).Y) / 2 - cy) : prev;
                     int bottom = Math.Max(top + 1, (int)Math.Round((At(0, v1).Y + At(1, v1).Y) / 2 - cy));
-                    prevBottom = bottom;
-                    int xl = (int)Math.Round(l.X - cx), xr = Math.Max(xl + 1, (int)Math.Round(r.X - cx));
-                    g.DrawImage(img, new Rectangle(xl, top, xr - xl, bottom - top), 0, y * k, img.Width, rh * k, GraphicsUnit.Pixel, edgeClamp);
+                    prev = bottom;
+                    int xl = (int)Math.Round(At(0, vm).X - cx), xr = Math.Max(xl + 1, (int)Math.Round(At(1, vm).X - cx));
+                    Blit(xl, top, xr - xl, bottom - top, 0, y * srcH / H, srcW, Math.Max(1, (y + rh) * srcH / H - y * srcH / H), CW, CH);
                 }
-            }
+            else
+                for (int x = 0; x < W; x += Strip)   // columnas: se desplazan y estiran hacia arriba y abajo
+                {
+                    int cw = Math.Min(Strip, W - x);
+                    float u0 = x / (float)W, u1 = (x + cw) / (float)W, um = (u0 + u1) / 2;
+                    int left = prev == int.MinValue ? (int)Math.Round((At(u0, 0).X + At(u0, 1).X) / 2 - cx) : prev;
+                    int right = Math.Max(left + 1, (int)Math.Round((At(u1, 0).X + At(u1, 1).X) / 2 - cx));
+                    prev = right;
+                    int yt = (int)Math.Round(At(um, 0).Y - cy), yb = Math.Max(yt + 1, (int)Math.Round(At(um, 1).Y - cy));
+                    Blit(left, yt, right - left, yb - yt, x * srcW / W, 0, Math.Max(1, (x + cw) * srcW / W - x * srcW / W), srcH, CW, CH);
+                }
+            // solo las filas del rectangulo tocado pasan a la memoria que lee la pantalla
+            IntPtr bits = canvas.Bits;
+            for (int y = dirty.Top; y < dirty.Bottom; y++)
+                System.Runtime.InteropServices.Marshal.Copy(buf, y * CW + dirty.Left, bits + (y * CW + dirty.Left) * 4, dirty.Width);
             prevBox = box;
             canvas.PushRegion(Handle, cx + box.X, cy + box.Y, box);
+        }
+
+        // copia un rectangulo de la captura (sx,sy,sw,sh) estirado a (dx,dy,dw,dh) con vecino mas cercano en punto fijo
+        void Blit(int dx, int dy, int dw, int dh, int sx, int sy, int sw, int sh, int CW, int CH)
+        {
+            if (dw <= 0 || dh <= 0) return;
+            int stepX = (sw << 16) / dw, stepY = (sh << 16) / dh;
+            int y0 = Math.Max(0, dy), y1 = Math.Min(CH, dy + dh), x0 = Math.Max(0, dx), x1 = Math.Min(CW, dx + dw);
+            for (int y = y0; y < y1; y++)
+            {
+                int srow = sy + Math.Min(sh - 1, (int)(((long)(y - dy) * stepY) >> 16));
+                int sOff = srow * srcW + sx, dOff = y * CW;
+                int acc = (x0 - dx) * stepX;
+                for (int x = x0; x < x1; x++, acc += stepX)
+                {
+                    int sc = acc >> 16; if (sc >= sw) sc = sw - 1;
+                    buf[dOff + x] = src[sOff + sc];
+                }
+            }
         }
 
         public void Finish(bool now)

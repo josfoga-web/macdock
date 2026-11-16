@@ -1639,11 +1639,21 @@ namespace MacDock
                         using (var gr = Graphics.FromImage(raw))
                         {
                             gr.SmoothingMode = SmoothingMode.AntiAlias;
-                            using (var b = new LinearGradientBrush(new Rectangle(0, -1, 256, 258), Color.FromArgb(94, 176, 255), Color.FromArgb(18, 96, 220), 90f)) gr.FillRectangle(b, 0, 0, 256, 256);
-                            float sq = 50, sg = 14, o = (256 - sq * 2 - sg) / 2;
-                            using (var w = new SolidBrush(Color.FromArgb(248, 255, 255, 255)))
-                                for (int i = 0; i < 4; i++)
-                                    using (var rp = Round(new RectangleF(o + (i % 2) * (sq + sg), o + (i / 2) * (sq + sg), sq, sq), 11)) gr.FillPath(w, rp);
+                            // estilo Launchpad: placa grafito con una cuadricula de mosaicos de colores redondeados
+                            using (var b = new LinearGradientBrush(new Rectangle(0, -1, 256, 258), Color.FromArgb(92, 94, 104), Color.FromArgb(40, 41, 48), 90f)) gr.FillRectangle(b, 0, 0, 256, 256);
+                            Color[] tiles = { Color.FromArgb(255, 95, 87), Color.FromArgb(255, 159, 10), Color.FromArgb(255, 214, 10),
+                                              Color.FromArgb(48, 209, 88), Color.FromArgb(100, 210, 255), Color.FromArgb(10, 132, 255),
+                                              Color.FromArgb(94, 92, 230), Color.FromArgb(191, 90, 242), Color.FromArgb(255, 55, 95) };
+                            float sq = 46, sg = 14, o = (256 - sq * 3 - sg * 2) / 2;
+                            for (int i = 0; i < 9; i++)
+                            {
+                                var tr = new RectangleF(o + (i % 3) * (sq + sg), o + (i / 3) * (sq + sg), sq, sq);
+                                using (var rp = Round(tr, 12))
+                                {
+                                    using (var tb = new LinearGradientBrush(new RectangleF(tr.X, tr.Y - 1, tr.Width, tr.Height + 2), ControlPaint.Light(tiles[i], 0.25f), tiles[i], 90f)) gr.FillPath(tb, rp);
+                                    using (var hp = new Pen(Color.FromArgb(70, 255, 255, 255), 1.5f)) gr.DrawPath(hp, rp);
+                                }
+                            }
                         }
                         startIcon = MacIcon.Tile(raw, 256);
                     }
