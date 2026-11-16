@@ -20,6 +20,7 @@ namespace MacDock
         delegate void WinEventProc(IntPtr hook, uint ev, IntPtr hwnd, int obj, int child, uint thread, uint time);
         [DllImport("user32.dll")] static extern IntPtr SetWinEventHook(uint min, uint max, IntPtr mod, WinEventProc proc, uint pid, uint tid, uint flags);
         [DllImport("user32.dll")] static extern bool UnhookWinEvent(IntPtr h);
+        [DllImport("shell32.dll", CharSet = CharSet.Unicode)] static extern int SHEmptyRecycleBin(IntPtr hwnd, string root, uint flags);
 
         float s; bool light;
         Screen targetScreen;
@@ -31,11 +32,15 @@ namespace MacDock
         int appBarMsg;
         WinEventProc proc; IntPtr hook;
         System.Windows.Forms.Timer timer = new System.Windows.Forms.Timer();
-        string appName = "Escritorio", title = "", lastKey = "";
+        string appName = "Finder", title = "", lastKey = "";
         IntPtr fgWnd = IntPtr.Zero;
         RectangleF rLogo, rApp, rWinMenu, rWifi, rVol, rBat, rCc, rClock, rTheme, rTray;
         public Action ToggleTheme;   // lo conecta el dock: cambia claro/oscuro
         public Action ShowTray;      // lo conecta el dock: muestra los iconos de la bandeja (Surfshark, Drive...)
+        public Action<string> OpenFolder;   // lo conecta el dock: abre una carpeta en Finder (o en el Explorador)
+        bool onDesk = true;                 // el escritorio esta al frente: la barra muestra "Finder"
+        List<KeyValuePair<string, RectangleF>> menus = new List<KeyValuePair<string, RectangleF>>();
+        RectangleF hl = RectangleF.Empty;   // elemento resaltado mientras su menu esta abierto (como en macOS)
         Dictionary<string, string> nameCache = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
         static readonly uint myPid = (uint)Process.GetCurrentProcess().Id;
 
@@ -58,7 +63,7 @@ namespace MacDock
         }
         protected override bool ShowWithoutActivation { get { return true; } }
 
-        public int BarHeight { get { return (int)Math.Round(26 * s); } }
+        public int BarHeight { get { return (int)Math.Round(24 * s); } }
         public Screen CurrentScreen { get { return targetScreen; } }
 
         protected override void OnShown(EventArgs e)
@@ -99,6 +104,7 @@ namespace MacDock
                 var sb = new MenuBar(sc, light, scr, true, false);
                 sb.ToggleTheme = ToggleTheme;
                 sb.ShowTray = ShowTray;
+                sb.OpenFolder = OpenFolder;
                 sb.Show();
                 secondaryBars.Add(sb);
             }
@@ -124,7 +130,8 @@ namespace MacDock
                 if (cls == "Shell_TrayWnd" || cls == "Shell_SecondaryTrayWnd" || cls == "Windows.UI.Core.CoreWindow" || cls == "XamlExplorerHostIslandWindow" || cls == "#32768") return;
                 fgWnd = h;
                 string path = N.ProcessPath(pid);
-                if (cls == "Progman" || cls == "WorkerW") { appName = "Escritorio"; title = ""; }
+                onDesk = cls == "Progman" || cls == "WorkerW";
+                if (onDesk) { appName = "Finder"; title = ""; }
                 else if (path.EndsWith("\\explorer.exe", StringComparison.OrdinalIgnoreCase)) { appName = "Explorador"; title = N.TitleOf(h); }
                 else { appName = NiceName(path); title = N.TitleOf(h); }
                 Redraw(false);
@@ -186,7 +193,7 @@ namespace MacDock
             SystemStats.GetNetworkInfo(out net, out isEth, out netLbl);
             bool isDesk = DeviceProfile.IsDesktop;
             string clock = ClockText();
-            string key = appName + "|" + title + "|" + clock + "|" + (isDesk ? -1 : (int)(ps.BatteryLifePercent * 100)) + ps.PowerLineStatus + "|" + net + "|" + isEth + "|" + light;
+            string key = appName + "|" + onDesk + "|" + hl + "|" + clock + "|" + (isDesk ? -1 : (int)(ps.BatteryLifePercent * 100)) + ps.PowerLineStatus + "|" + net + "|" + isEth + "|" + light;
             if (!force && key == lastKey) return;
             lastKey = key;
 
@@ -204,6 +211,9 @@ namespace MacDock
                     using (var p = new Pen(light ? Color.FromArgb(30, 0, 0, 0) : Color.FromArgb(40, 255, 255, 255))) g.DrawLine(p, 0, H - 1, W, H - 1);
 
                     float cy = H / 2f;
+                    if (!hl.IsEmpty)
+                        using (var hp = Round(new RectangleF(hl.X, 2.5f * s, hl.Width, H - 5 * s), 5 * s))
+                        using (var hb = new SolidBrush(light ? Color.FromArgb(38, 0, 0, 0) : Color.FromArgb(48, 255, 255, 255))) g.FillPath(hb, hp);
                     using (var fBold = new Font(UiFont.Semi, 13f * s, FontStyle.Regular, GraphicsUnit.Pixel))
                     using (var fReg = new Font(UiFont.Reg, 13f * s, FontStyle.Regular, GraphicsUnit.Pixel))
                     using (var fIcon = new Font("Segoe MDL2 Assets", 13f * s, FontStyle.Regular, GraphicsUnit.Pixel))
@@ -222,14 +232,20 @@ namespace MacDock
                         g.DrawString(appName, fBold, fgB, x, cy - an.Height / 2);
                         x += an.Width + 14 * s;
 
-                        if (appName != "Escritorio")
+                        // menus de la app, como en macOS: Archivo, Edicion, Ver, (Ir), Ventana, Ayuda
+                        menus.Clear(); rWinMenu = RectangleF.Empty;
+                        string[] names = onDesk ? new[] { "Archivo", "Edición", "Ver", "Ir", "Ventana", "Ayuda" }
+                                                : new[] { "Archivo", "Edición", "Ver", "Ventana", "Ayuda" };
+                        foreach (var mn in names)
                         {
-                            var wn = g.MeasureString("Ventana", fReg);
-                            rWinMenu = new RectangleF(x - 6 * s, 0, wn.Width + 12 * s, H);
-                            g.DrawString("Ventana", fReg, fgB, x, cy - wn.Height / 2);
-                            x += wn.Width + 16 * s;
+                            var ms = g.MeasureString(mn, fReg);
+                            var mr = new RectangleF(x - 7 * s, 0, ms.Width + 14 * s, H);
+                            if (mr.Right > W * 0.55f) break;
+                            g.DrawString(mn, fReg, fgB, x, cy - ms.Height / 2);
+                            menus.Add(new KeyValuePair<string, RectangleF>(mn, mr));
+                            if (mn == "Ventana") rWinMenu = mr;
+                            x += ms.Width + 14 * s;
                         }
-                        else rWinMenu = RectangleF.Empty;
 
                         // derecha: reloj, Centro de Control, bateria (solo laptop), volumen, red (Ethernet o Wi-Fi)
                         float rx = W - 14 * s;
@@ -294,14 +310,6 @@ namespace MacDock
                         rTray = new RectangleF(rx - 6 * s, 0, trs.Width + 12 * s, H);
                         rx -= 24 * s;
 
-                        // titulo de la ventana, atenuado, en el espacio que sobra
-                        if (title != "" && title != appName && rx - x > 80 * s)
-                        {
-                            string t = title;
-                            float maxW = Math.Min(rx - x, W * 0.45f);
-                            var sf = new StringFormat { Trimming = StringTrimming.EllipsisCharacter, FormatFlags = StringFormatFlags.NoWrap };
-                            g.DrawString(t, fReg, dimB, new RectangleF(x, cy - fReg.Height / 2f - 1, maxW, fReg.Height + 2), sf);
-                        }
                     }
                 }
                 Push(bmp);
@@ -329,7 +337,7 @@ namespace MacDock
             var n = DateTime.Now;
             string[] d = { "dom", "lun", "mar", "mié", "jue", "vie", "sáb" };
             string[] m = { "ene", "feb", "mar", "abr", "may", "jun", "jul", "ago", "sept", "oct", "nov", "dic" };
-            return d[(int)n.DayOfWeek] + " " + n.Day + " " + m[n.Month - 1] + "   " + n.ToString("HH:mm");
+            return d[(int)n.DayOfWeek] + " " + n.Day + " " + m[n.Month - 1] + "  " + n.ToString("H:mm");
         }
 
         static GraphicsPath Round(RectangleF r, float rad)
@@ -365,13 +373,15 @@ namespace MacDock
             base.OnMouseUp(e);
             try
             {
+                foreach (var mn in menus)
+                    if (mn.Value.Contains(e.Location)) { OpenAppMenu(mn.Key, mn.Value); return; }
                 if (rTheme.Contains(e.Location)) { if (ToggleTheme != null) ToggleTheme(); }
                 else if (rTray.Contains(e.Location)) { if (ShowTray != null) ShowTray(); }
                 else if (rLogo.Contains(e.Location)) SystemMenu();
                 else if (rApp.Contains(e.Location)) AppMenu();
-                else if (!rWinMenu.IsEmpty && rWinMenu.Contains(e.Location)) WindowTilingMenu(rWinMenu);
                 else if (rCc.Contains(e.Location) || rWifi.Contains(e.Location) || rVol.Contains(e.Location) || rBat.Contains(e.Location))
                 {
+                    Flash(rCc.Contains(e.Location) ? rCc : rWifi.Contains(e.Location) ? rWifi : rVol.Contains(e.Location) ? rVol : rBat);
                     var anchor = new Point(X + W - (int)(12 * s), Y + H + (int)(6 * s));
                     ControlCenter.Toggle(s, light, anchor, targetScreen.Bounds, true, ToggleTheme);
                 }
@@ -385,9 +395,10 @@ namespace MacDock
             return MenuStyle.New(light);
         }
 
-        static void Item(ContextMenuStrip m, string text, Action a)
+        static void Item(ContextMenuStrip m, string text, Action a, string shortcut = null)
         {
             var mi = new ToolStripMenuItem(text);
+            if (shortcut != null) { mi.ShortcutKeyDisplayString = shortcut; mi.ShowShortcutKeys = true; }
             mi.Click += (o, e) => { try { a(); } catch (Exception ex) { Program.Log(ex); } };
             m.Items.Add(mi);
         }
@@ -424,26 +435,33 @@ namespace MacDock
         void AppMenu()
         {
             IntPtr h = fgWnd;
-            if (h == IntPtr.Zero || appName == "Escritorio") return;
+            if (h == IntPtr.Zero || onDesk) { DesktopAppMenu(); return; }
             var m = NewMenu();
-            AddTilingItems(m, h);
+            Item(m, "Acerca de " + appName, () => { });
+            ((ToolStripMenuItem)m.Items[m.Items.Count - 1]).Enabled = false;
             m.Items.Add(new ToolStripSeparator());
-            Item(m, "Minimizar", () => N.ShowWindow(h, 6));
-            Item(m, N.IsZoomed(h) ? "Restaurar tamaño" : "Maximizar", () => N.ShowWindow(h, N.IsZoomed(h) ? 9 : 3));
+            Item(m, "Ocultar " + appName, () => N.ShowWindow(h, 6), "Ctrl+H");
             m.Items.Add(new ToolStripSeparator());
-            Item(m, "Cerrar ventana", () => N.PostMessage(h, 0x10, IntPtr.Zero, IntPtr.Zero));
+            Item(m, "Salir de " + appName, () => N.PostMessage(h, 0x10, IntPtr.Zero, IntPtr.Zero), "Alt+F4");
             Show(m, rApp);
         }
 
         void WindowTilingMenu(RectangleF anchorRect)
         {
             IntPtr h = fgWnd;
-            if (h == IntPtr.Zero || appName == "Escritorio") return;
             var m = NewMenu();
+            if (h == IntPtr.Zero || onDesk)
+            {
+                Item(m, "Minimizar todo", () => N.PressKeys(0x5B, 0x44), "Win+D");
+                Item(m, "Vista de tareas", () => N.PressKeys(0x5B, 0x09), "Win+Tab");
+                Show(m, anchorRect); return;
+            }
+            Item(m, "Minimizar", () => N.ShowWindow(h, 6), "Win+↓");
+            Item(m, N.IsZoomed(h) ? "Restaurar tamaño" : "Zoom", () => N.ShowWindow(h, N.IsZoomed(h) ? 9 : 3));
+            m.Items.Add(new ToolStripSeparator());
             AddTilingItems(m, h);
             m.Items.Add(new ToolStripSeparator());
-            Item(m, "Minimizar", () => N.ShowWindow(h, 6));
-            Item(m, N.IsZoomed(h) ? "Restaurar tamaño" : "Maximizar", () => N.ShowWindow(h, N.IsZoomed(h) ? 9 : 3));
+            Item(m, "Vista de tareas", () => N.PressKeys(0x5B, 0x09), "Win+Tab");
             Show(m, anchorRect);
         }
 
@@ -503,7 +521,7 @@ namespace MacDock
                         break;
                     case 10: break;                                     // Todo el WorkingArea
                 }
-                SetWindowBoundsCompensated(h, x, y, w, hh);
+                AnimateBounds(h, x, y, w, hh);
                 N.SetForegroundWindow(h);
             }
             catch (Exception ex) { Program.Log(ex); }
@@ -523,8 +541,8 @@ namespace MacDock
                 if (wasMax || N.IsIconic(h)) N.ShowWindow(h, 9);
                 var wa = next.WorkingArea;
                 int w = (int)(wa.Width * 0.82f), hh = (int)(wa.Height * 0.82f);
-                SetWindowBoundsCompensated(h, wa.Left + (wa.Width - w) / 2, wa.Top + (wa.Height - hh) / 2, w, hh);
-                if (wasMax) N.ShowWindow(h, 3);
+                if (wasMax) { SetWindowBoundsCompensated(h, wa.Left + (wa.Width - w) / 2, wa.Top + (wa.Height - hh) / 2, w, hh); N.ShowWindow(h, 3); }
+                else AnimateBounds(h, wa.Left + (wa.Width - w) / 2, wa.Top + (wa.Height - hh) / 2, w, hh);
                 N.SetForegroundWindow(h);
             }
             catch (Exception ex) { Program.Log(ex); }
@@ -549,8 +567,168 @@ namespace MacDock
 
         void Show(ContextMenuStrip m, RectangleF r)
         {
+            hl = r; Redraw(true);
+            m.Closed += (o, e) => { hl = RectangleF.Empty; try { Redraw(true); } catch { } };
             N.SetForegroundWindow(Handle);
-            m.Show(new Point(X + (int)r.X, Y + H));
+            m.Show(new Point(X + (int)r.X, Y + H + (int)(3 * s)));
+        }
+
+        // resalta un elemento un instante (iconos de estado que abren paneles propios)
+        void Flash(RectangleF r)
+        {
+            hl = r; Redraw(true);
+            var t = new System.Windows.Forms.Timer { Interval = 260 };
+            t.Tick += (o, e) => { t.Stop(); t.Dispose(); hl = RectangleF.Empty; try { Redraw(true); } catch { } };
+            t.Start();
+        }
+
+        // ---------- menus de la app (Archivo, Edicion, Ver...) ----------
+        // Se mandan los atajos de teclado estandar a la ventana que estaba al frente.
+        void OpenAppMenu(string name, RectangleF r)
+        {
+            IntPtr h = onDesk ? IntPtr.Zero : fgWnd;
+            var m = NewMenu();
+            const byte C = 0x11, SH = 0x10, WIN = 0x5B;
+            switch (name)
+            {
+                case "Archivo":
+                    if (onDesk)
+                    {
+                        Item(m, "Nueva ventana de Finder", () => Open(null), "Ctrl+N");
+                        Item(m, "Nueva carpeta", () => SendShortcut(h, C, SH, 0x4E), "Ctrl+Mayús+N");
+                        m.Items.Add(new ToolStripSeparator());
+                        Item(m, "Buscar...", () => N.PressKeys(0x12, 0x20), "Alt+Espacio");
+                        break;
+                    }
+                    Item(m, "Nuevo", () => SendShortcut(h, C, 0x4E), "Ctrl+N");
+                    Item(m, "Abrir...", () => SendShortcut(h, C, 0x4F), "Ctrl+O");
+                    m.Items.Add(new ToolStripSeparator());
+                    Item(m, "Cerrar pestaña", () => SendShortcut(h, C, 0x57), "Ctrl+W");
+                    Item(m, "Guardar", () => SendShortcut(h, C, 0x53), "Ctrl+S");
+                    Item(m, "Guardar como...", () => SendShortcut(h, C, SH, 0x53), "Ctrl+Mayús+S");
+                    m.Items.Add(new ToolStripSeparator());
+                    Item(m, "Imprimir...", () => SendShortcut(h, C, 0x50), "Ctrl+P");
+                    break;
+                case "Edición":
+                    Item(m, "Deshacer", () => SendShortcut(h, C, 0x5A), "Ctrl+Z");
+                    Item(m, "Rehacer", () => SendShortcut(h, C, 0x59), "Ctrl+Y");
+                    m.Items.Add(new ToolStripSeparator());
+                    Item(m, "Cortar", () => SendShortcut(h, C, 0x58), "Ctrl+X");
+                    Item(m, "Copiar", () => SendShortcut(h, C, 0x43), "Ctrl+C");
+                    Item(m, "Pegar", () => SendShortcut(h, C, 0x56), "Ctrl+V");
+                    Item(m, "Seleccionar todo", () => SendShortcut(h, C, 0x41), "Ctrl+A");
+                    m.Items.Add(new ToolStripSeparator());
+                    if (!onDesk) Item(m, "Buscar...", () => SendShortcut(h, C, 0x46), "Ctrl+F");
+                    Item(m, "Historial del portapapeles", () => SendShortcut(h, WIN, 0x56), "Win+V");
+                    Item(m, "Emoji y símbolos", () => SendShortcut(h, WIN, 0xBE), "Win+.");
+                    break;
+                case "Ver":
+                    if (onDesk)
+                    {
+                        Item(m, "Actualizar", () => SendShortcut(h, 0x74), "F5");
+                        break;
+                    }
+                    Item(m, "Acercar", () => SendShortcut(h, C, 0xBB), "Ctrl++");
+                    Item(m, "Alejar", () => SendShortcut(h, C, 0xBD), "Ctrl+-");
+                    Item(m, "Tamaño real", () => SendShortcut(h, C, 0x30), "Ctrl+0");
+                    m.Items.Add(new ToolStripSeparator());
+                    Item(m, "Actualizar", () => SendShortcut(h, 0x74), "F5");
+                    Item(m, "Pantalla completa", () => SendShortcut(h, 0x7A), "F11");
+                    break;
+                case "Ir":
+                    string home = Environment.GetFolderPath(Environment.SpecialFolder.UserProfile);
+                    Item(m, "Escritorio", () => Open(Environment.GetFolderPath(Environment.SpecialFolder.DesktopDirectory)));
+                    Item(m, "Documentos", () => Open(Environment.GetFolderPath(Environment.SpecialFolder.MyDocuments)));
+                    Item(m, "Descargas", () => Open(N.Downloads()));
+                    Item(m, "Imágenes", () => Open(Environment.GetFolderPath(Environment.SpecialFolder.MyPictures)));
+                    Item(m, "Música", () => Open(Environment.GetFolderPath(Environment.SpecialFolder.MyMusic)));
+                    Item(m, "Inicio", () => Open(home));
+                    m.Items.Add(new ToolStripSeparator());
+                    Item(m, "Este equipo", () => Process.Start("explorer.exe", "shell:MyComputerFolder"));
+                    Item(m, "Papelera", () => Process.Start("explorer.exe", "shell:RecycleBinFolder"));
+                    break;
+                case "Ventana":
+                    WindowTilingMenu(r); return;
+                case "Ayuda":
+                    if (!onDesk) Item(m, "Ayuda de " + appName, () => SendShortcut(h, 0x70), "F1");
+                    Item(m, "Atajos de teclado de Windows", () => Process.Start("https://support.microsoft.com/es-es/windows/m%C3%A9todos-abreviados-de-teclado-de-windows-dcc61a57-8ff0-cffe-9796-cb9706c75eec"));
+                    Item(m, "Obtener ayuda de Windows", () => Process.Start("ms-contact-support:"));
+                    break;
+            }
+            Show(m, r);
+        }
+
+        void Open(string path)
+        {
+            if (OpenFolder != null) OpenFolder(path);
+            else Process.Start("explorer.exe", path == null ? "" : "\"" + path + "\"");
+        }
+
+        // devuelve el foco a la ventana y le manda el atajo, cuando el menu ya se cerro
+        static void SendShortcut(IntPtr h, params byte[] keys)
+        {
+            var t = new System.Windows.Forms.Timer { Interval = 60 };
+            int step = 0;
+            t.Tick += (o, e) =>
+            {
+                if (step++ == 0) { if (h != IntPtr.Zero) N.SetForegroundWindow(h); return; }
+                t.Stop(); t.Dispose();
+                try { N.PressKeys(keys); } catch { }
+            };
+            t.Start();
+        }
+
+        void DesktopAppMenu()
+        {
+            var m = NewMenu();
+            Item(m, "Acerca de Finder", () => { });
+            ((ToolStripMenuItem)m.Items[0]).Enabled = false;
+            m.Items.Add(new ToolStripSeparator());
+            Item(m, "Ajustes de Windows (MacDock)", () =>
+            {
+                string ps = Path.Combine(Program.DataDir, "ajustes.ps1");
+                if (File.Exists(ps)) Process.Start(Path.Combine(Environment.SystemDirectory, @"WindowsPowerShell\v1.0\powershell.exe"), "-NoProfile -ExecutionPolicy Bypass -File \"" + ps + "\"");
+            });
+            m.Items.Add(new ToolStripSeparator());
+            Item(m, "Vaciar Papelera...", () => SHEmptyRecycleBin(Handle, null, 0));
+            Show(m, rApp);
+        }
+
+        // ---------- movimiento suave de ventanas (como el acomodo de macOS) ----------
+        static System.Windows.Forms.Timer animTimer;
+        static IntPtr animWnd;
+
+        static void AnimateBounds(IntPtr h, int x, int y, int w, int hh)
+        {
+            N.RECT cur;
+            if (!N.GetWindowRect(h, out cur) || SystemInformation.TerminalServerSession) { SetWindowBoundsCompensated(h, x, y, w, hh); return; }
+            // destino ya compensado por los bordes invisibles de Windows 11
+            N.RECT ext; int dL = 0, dT = 0, dR = 0, dB = 0;
+            if (N.DwmGetWindowAttribute(h, 9, out ext, 16) == 0)
+            {
+                dL = ext.left - cur.left; dT = ext.top - cur.top; dR = cur.right - ext.right; dB = cur.bottom - ext.bottom;
+                if (dL < 0 || dL >= 32 || dR < 0 || dR >= 32 || dB < 0 || dB >= 32) { dL = dT = dR = dB = 0; }
+            }
+            int tx = x - dL, ty = y - dT, tw = w + dL + dR, th = hh + dT + dB;
+            int sx = cur.left, sy = cur.top, sw = cur.right - cur.left, sh = cur.bottom - cur.top;
+            if (animTimer != null) { animTimer.Stop(); animTimer.Dispose(); animTimer = null; }
+            animWnd = h;
+            var start = DateTime.Now; const double dur = 220;
+            animTimer = new System.Windows.Forms.Timer { Interval = 15 };
+            var me = animTimer;
+            me.Tick += (o, e) =>
+            {
+                double t = Math.Min(1, (DateTime.Now - start).TotalMilliseconds / dur);
+                double k = 1 - Math.Pow(1 - t, 3);   // ease-out cubico
+                if (t >= 1)
+                {
+                    me.Stop(); me.Dispose(); if (animTimer == me) animTimer = null;
+                    N.SetWindowPos(h, IntPtr.Zero, tx, ty, tw, th, 0x0004 | 0x0010);
+                    return;
+                }
+                N.SetWindowPos(h, IntPtr.Zero, (int)(sx + (tx - sx) * k), (int)(sy + (ty - sy) * k), (int)(sw + (tw - sw) * k), (int)(sh + (th - sh) * k), 0x0004 | 0x0010 | 0x0100);
+            };
+            me.Start();
         }
 
         // ---------- reservar el espacio arriba (como Mac) ----------

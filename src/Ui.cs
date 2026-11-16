@@ -189,7 +189,9 @@ namespace MacDock
 
         protected override void OnRenderItemText(ToolStripItemTextRenderEventArgs e)
         {
-            e.TextColor = !e.Item.Enabled ? dim : (e.Item.Selected ? Color.White : fg);
+            var mi = e.Item as ToolStripMenuItem;
+            bool isShortcut = mi != null && !string.IsNullOrEmpty(mi.ShortcutKeyDisplayString) && e.Text == mi.ShortcutKeyDisplayString;
+            e.TextColor = !e.Item.Enabled ? dim : (e.Item.Selected ? (isShortcut ? Color.FromArgb(225, 236, 255) : Color.White) : (isShortcut ? dim : fg));
             e.Graphics.TextRenderingHint = TextRenderingHint.AntiAliasGridFit;
             base.OnRenderItemText(e);
         }

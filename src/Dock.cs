@@ -103,6 +103,7 @@ namespace MacDock
         public TimeSpan DarkFrom = new TimeSpan(18, 30, 0);
         public bool HideTaskbar = true;
         public bool Magnify = true;
+        public bool MacIcons = true;
         string path;
 
         public Config(string p)
@@ -133,6 +134,7 @@ namespace MacDock
                 else if (k == "desktopmenu") DesktopMenu = v == "1";
                 else if (k == "windowpreviews") WindowPreviews = v == "1";
                 else if (k == "multimonitor") MultiMonitor = v == "1";
+                else if (k == "macicons") MacIcons = v == "1";
                 else if (k == "devicemode" && int.TryParse(v, out i)) DeviceMode = Math.Max(0, Math.Min(2, i));
                 else if (k == "gamingmode") GamingMode = v == "1";
                 else if (k == "lightfrom") { TimeSpan t; if (TimeSpan.TryParse(v, out t)) LightFrom = t; }
@@ -169,6 +171,7 @@ namespace MacDock
                     "DesktopMenu=" + (DesktopMenu ? 1 : 0) + "\r\n" +
                     "WindowPreviews=" + (WindowPreviews ? 1 : 0) + "\r\n" +
                     "MultiMonitor=" + (MultiMonitor ? 1 : 0) + "\r\n" +
+                    "MacIcons=" + (MacIcons ? 1 : 0) + "\r\n" +
                     "DeviceMode=" + DeviceMode + "\r\n" +
                     "GamingMode=" + (GamingMode ? 1 : 0) + "\r\n" +
                     "ReserveSpace=" + (ReserveSpace ? 1 : 0) + "\r\n" +
@@ -742,6 +745,11 @@ namespace MacDock
                 bar = new MenuBar(s, light, Screen.PrimaryScreen, false, cfg.MultiMonitor);
                 bar.ToggleTheme = ToggleTheme;
                 bar.ShowTray = ShowTray;
+                bar.OpenFolder = path =>
+                {
+                    if (cfg.UseFinder) Finder.OpenOrFocus(light, s, path);
+                    else Process.Start("explorer.exe", path == null ? "" : "\"" + path + "\"");
+                };
                 bar.Show();
             }
             else if (!on && bar != null)
@@ -915,15 +923,31 @@ namespace MacDock
         }
 
         // ---------- items ----------
-        int IconPx { get { int need = (int)Math.Ceiling(Ic * Math.Max(1f, MaxMag)); return need <= 128 ? 128 : 256; } }
+        int IconPx { get { if (cfg.MacIcons) return 256; int need = (int)Math.Ceiling(Ic * Math.Max(1f, MaxMag)); return need <= 128 ? 128 : 256; } }
 
         Bitmap IconFor(string parsingName)
         {
             Bitmap b;
             if (iconCache.TryGetValue(parsingName, out b)) return b;
             b = Shell.GetIcon(parsingName, IconPx);
+            if (cfg.MacIcons && b != null) b = MacIcon.Tile(b, IconPx);
             iconCache[parsingName] = b;
             return b;
+        }
+
+        Bitmap FolderIcon(string dir, int glyph) { return cfg.MacIcons ? MacIcon.Folder(IconPx, glyph) : Shell.GetIcon(dir, IconPx); }
+
+        Bitmap startIcon, macShadow;
+
+        // vuelve a generar todos los iconos (al activar o desactivar los iconos estilo Mac)
+        void RefreshIcons()
+        {
+            iconCache.Clear(); startIcon = null; macShadow = null;
+            foreach (var it in pinned) if (it.Lnk != null) it.Icon = IconFor(it.Lnk);
+            foreach (var it in transient) if (!string.IsNullOrEmpty(it.Target)) it.Icon = IconFor(it.Target);
+            if (downloadsItem != null) downloadsItem.Icon = FolderIcon(downloadsItem.Target, 1);
+            if (stackItem != null) stackItem.Icon = FolderIcon(stackItem.Target, 2);
+            Render();
         }
 
         void BuildItems()
@@ -957,12 +981,12 @@ namespace MacDock
                 startItem = new DockItem { Kind = Kind.Start, Name = "Inicio" };
                 clockItem = new DockItem { Kind = Kind.Clock, Name = "Centro de control" };
                 string dl = N.Downloads();
-                downloadsItem = new DockItem { Kind = Kind.Downloads, Name = "Descargas", Target = dl, Icon = Shell.GetIcon(dl, IconPx) };
+                downloadsItem = new DockItem { Kind = Kind.Downloads, Name = "Descargas", Target = dl, Icon = FolderIcon(dl, 1) };
                 trashFull = N.RecycleBinFull();
                 trashItem = new DockItem { Kind = Kind.Trash, Name = "Papelera", Icon = TrashIcon() };
                 sepItem = new DockItem { Kind = Kind.Separator };
                 string desk = Environment.GetFolderPath(Environment.SpecialFolder.DesktopDirectory);
-                stackItem = new DockItem { Kind = Kind.Stack, Name = "Escritorio", Target = desk, Icon = Shell.GetIcon(desk, IconPx) };
+                stackItem = new DockItem { Kind = Kind.Stack, Name = "Escritorio", Target = desk, Icon = FolderIcon(desk, 2) };
             }
             Compose();
         }
@@ -1308,7 +1332,16 @@ namespace MacDock
                     var r = new RectangleF(ix, iy, size, size);
                     if (it.Kind == Kind.Start) DrawStart(g, r);
                     else if (it.Kind == Kind.Clock) DrawClock(g, r);
-                    else if (it.Icon != null) g.DrawImage(it.Icon, r);
+                    else if (it.Icon != null)
+                    {
+                        if (it == pressItem && !dragging)
+                            using (var ia = new ImageAttributes())
+                            {
+                                ia.SetColorMatrix(new ColorMatrix(new[] { new float[] { 0.62f, 0, 0, 0, 0 }, new float[] { 0, 0.62f, 0, 0, 0 }, new float[] { 0, 0, 0.62f, 0, 0 }, new float[] { 0, 0, 0, 1, 0 }, new float[] { 0, 0, 0, 0, 1 } }));
+                                g.DrawImage(it.Icon, new[] { new PointF(r.X, r.Y), new PointF(r.Right, r.Y), new PointF(r.X, r.Bottom) }, new RectangleF(0, 0, it.Icon.Width, it.Icon.Height), GraphicsUnit.Pixel, ia);
+                            }
+                        else g.DrawImage(it.Icon, r);
+                    }
                     else DrawPlaceholder(g, r, it.Name);
                     if (it == hover) hoverTop = iy; if (it.Badge > 0) DrawBadge(g, r, it.Badge);
 
@@ -1346,6 +1379,26 @@ namespace MacDock
 
         void DrawStart(Graphics g, RectangleF r)
         {
+            if (cfg.MacIcons)
+            {
+                if (startIcon == null)
+                {
+                    using (var raw = new Bitmap(256, 256, PixelFormat.Format32bppArgb))
+                    {
+                        using (var gr = Graphics.FromImage(raw))
+                        {
+                            gr.SmoothingMode = SmoothingMode.AntiAlias;
+                            using (var b = new LinearGradientBrush(new Rectangle(0, -1, 256, 258), Color.FromArgb(94, 176, 255), Color.FromArgb(18, 96, 220), 90f)) gr.FillRectangle(b, 0, 0, 256, 256);
+                            float sq = 50, sg = 14, o = (256 - sq * 2 - sg) / 2;
+                            using (var w = new SolidBrush(Color.FromArgb(248, 255, 255, 255)))
+                                for (int i = 0; i < 4; i++)
+                                    using (var rp = Round(new RectangleF(o + (i % 2) * (sq + sg), o + (i / 2) * (sq + sg), sq, sq), 11)) gr.FillPath(w, rp);
+                        }
+                        startIcon = MacIcon.Tile(raw, 256);
+                    }
+                }
+                g.DrawImage(startIcon, r); return;
+            }
             using (var p = Round(r, r.Width * 0.225f))
             using (var b = new LinearGradientBrush(r, Color.FromArgb(77, 163, 255), Color.FromArgb(16, 92, 214), 90f))
                 g.FillPath(b, p);
@@ -1360,7 +1413,15 @@ namespace MacDock
 
         void DrawClock(Graphics g, RectangleF r)
         {
-            using (var p = Round(r, r.Width * 0.225f))
+            if (cfg.MacIcons)
+            {
+                // misma forma, tamano y sombra que los demas iconos
+                if (macShadow == null) macShadow = MacIcon.ShadowOnly(256);
+                g.DrawImage(macShadow, r);
+                float bw = r.Width * MacIcon.BodyRatio;
+                r = new RectangleF(r.X + (r.Width - bw) / 2, r.Y + (r.Height - bw) / 2 - r.Height * MacIcon.LiftRatio, bw, bw);
+            }
+            using (var p = cfg.MacIcons ? MacIcon.Squircle(r) : Round(r, r.Width * 0.225f))
             {
                 using (var b = new SolidBrush(Color.FromArgb(252, 252, 252))) g.FillPath(b, p);
                 using (var pen = new Pen(Color.FromArgb(40, 0, 0, 0), Math.Max(1f, s * 0.6f))) g.DrawPath(pen, p);
@@ -1458,12 +1519,14 @@ namespace MacDock
             pressItem = i >= 0 ? all[i] : null;
             pressPt = e.Location;
             dragging = false;
+            if (pressItem != null) Render();   // el icono se oscurece mientras se presiona, como en macOS
         }
 
         protected override void OnMouseUp(MouseEventArgs e)
         {
             base.OnMouseUp(e);
             var item = pressItem; pressItem = null;
+            if (item != null) Render();
             if (dragging) { dragging = false; SaveOrder(); return; }
             int i = HitIndex(e.X);
             var it = i >= 0 ? all[i] : null;
@@ -1642,6 +1705,7 @@ namespace MacDock
             addOpt("Modo Gaming / Render 0% CPU (pantalla completa y sin bordes)", cfg.GamingMode, () => { cfg.GamingMode = !cfg.GamingMode; cfg.Save(); });
             opts.DropDownItems.Add(new ToolStripSeparator());
 
+            addOpt("Iconos estilo macOS (forma redondeada)", cfg.MacIcons, () => { cfg.MacIcons = !cfg.MacIcons; cfg.Save(); RefreshIcons(); });
             addOpt("Efecto lupa", cfg.Magnify, () => { cfg.Magnify = !cfg.Magnify; cfg.Save(); Relayout(); });
             addOpt("Vista previa de ventanas al pasar el mouse", cfg.WindowPreviews, () => { cfg.WindowPreviews = !cfg.WindowPreviews; cfg.Save(); if (!cfg.WindowPreviews) ClosePreview(); });
             addOpt("Soporte multi-monitor (dock y barra superior)", cfg.MultiMonitor, () =>
