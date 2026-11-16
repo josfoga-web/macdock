@@ -127,6 +127,7 @@ namespace MacDock
             N.RECT r; N.GetWindowRect(h, out r);
             if (N.IsZoomed(h))
             {
+                Motion.Ignore(h);
                 // arrastrar una ventana maximizada la restaura bajo el puntero, manteniendo la proporcion
                 float ratio = (c.X - r.left) / (float)Math.Max(1, r.right - r.left);
                 N.ShowWindow(h, 9);
@@ -166,18 +167,16 @@ namespace MacDock
 namespace MacDock
 {
     // Efecto "genio" de macOS al minimizar: la ventana se curva, se estrecha y entra al icono de su app en el dock.
-    // Al restaurarla desde el dock sale del icono con la animacion inversa.
+    // Al restaurarla desde el dock sale del icono con la animacion inversa. La animacion la hace Motion con la imagen
+    // en vivo que guarda Windows de la ventana (sin capturas ni dibujo en el procesador).
     static class Genie
     {
-        [System.Runtime.InteropServices.DllImport("user32.dll")] static extern bool PrintWindow(IntPtr h, IntPtr hdc, uint flags);
         [System.Runtime.InteropServices.DllImport("dwmapi.dll")] static extern int DwmGetWindowAttribute(IntPtr h, int attr, out N.RECT r, int size);
         [System.Runtime.InteropServices.StructLayout(System.Runtime.InteropServices.LayoutKind.Sequential)] struct ANIMATIONINFO { public int cbSize, iMinAnimate; }
         [System.Runtime.InteropServices.DllImport("user32.dll", EntryPoint = "SystemParametersInfo")] static extern bool SpiAnim(int a, int u, ref ANIMATIONINFO p, int f);
 
         public static bool Enabled = true;
         public static Func<IntPtr, Rectangle> TargetFor;   // lo conecta el dock: rectangulo del icono de la app en pantalla
-        static readonly Dictionary<IntPtr, KeyValuePair<Bitmap, Rectangle>> shots = new Dictionary<IntPtr, KeyValuePair<Bitmap, Rectangle>>();
-        static int animOff;   // minimizaciones en curso con la animacion de Windows apagada
 
         internal static Rectangle Frame(IntPtr h)
         {
@@ -186,300 +185,44 @@ namespace MacDock
             return Rectangle.FromLTRB(r.left, r.top, r.right, r.bottom);
         }
 
-        internal static Bitmap Capture(IntPtr h, Rectangle frame) { return Capture(h, frame, 1100); }
-        internal static Bitmap Capture(IntPtr h, Rectangle frame, int maxSide)
-        {
-            N.RECT wr; N.GetWindowRect(h, out wr);
-            int w = wr.right - wr.left, hh = wr.bottom - wr.top;
-            if (w < 40 || hh < 40 || w > 8000 || hh > 8000) return null;
-            using (var full = new Bitmap(w, hh, System.Drawing.Imaging.PixelFormat.Format32bppArgb))
-            {
-                using (var g = Graphics.FromImage(full))
-                {
-                    IntPtr dc = g.GetHdc();
-                    bool ok;
-                    try { ok = PrintWindow(h, dc, 2); } finally { g.ReleaseHdc(dc); }
-                    if (!ok) return null;
-                }
-                // solo la parte visible (sin los bordes invisibles de Windows 11), reducida para animar rapido
-                var crop = new Rectangle(frame.Left - wr.left, frame.Top - wr.top, frame.Width, frame.Height);
-                crop.Intersect(new Rectangle(0, 0, w, hh));
-                float k = Math.Min(1f, maxSide / (float)Math.Max(crop.Width, crop.Height));
-                var b = new Bitmap(Math.Max(1, (int)(crop.Width * k)), Math.Max(1, (int)(crop.Height * k)), System.Drawing.Imaging.PixelFormat.Format32bppPArgb);
-                using (var g = Graphics.FromImage(b))
-                {
-                    g.InterpolationMode = InterpolationMode.HighQualityBilinear;
-                    g.DrawImage(full, new Rectangle(0, 0, b.Width, b.Height), crop, GraphicsUnit.Pixel);
-                }
-                return b;
-            }
-        }
-
-        static void SystemAnim(bool on)
-        {
-            var ai = new ANIMATIONINFO { cbSize = 8 };
-            if (!on) { if (animOff++ == 0) { SpiAnim(0x48, 8, ref ai, 0); savedAnim = ai.iMinAnimate; ai.iMinAnimate = 0; SpiAnim(0x49, 8, ref ai, 0); } }
-            else if (--animOff <= 0) { animOff = 0; ai.iMinAnimate = savedAnim; SpiAnim(0x49, 8, ref ai, 0); }
-        }
-        static int savedAnim = 1;
-
         public static void Minimize(IntPtr h)
         {
             if (!Enabled || TargetFor == null || N.IsIconic(h)) { N.ShowWindow(h, 6); return; }
-            try
-            {
-                var frame = Frame(h);
-                var shot = Capture(h, frame);
-                if (shot == null) { N.ShowWindow(h, 6); return; }
-                var target = TargetFor(h);
-                ours[h] = DateTime.Now;
-                Remember(h, shot, frame);
-                var fx = new GenieForm(shot, frame, target, false);
-                fx.Shown += (o, e) =>
-                {
-                    // la ventana real desaparece al instante; la animacion la hace la capa
-                    SystemAnim(false);
-                    N.ShowWindow(h, 6);
-                    var t = new System.Windows.Forms.Timer { Interval = 250 };
-                    t.Tick += (o2, e2) => { t.Stop(); t.Dispose(); SystemAnim(true); };
-                    t.Start();
-                };
-                fx.Show();
-            }
+            try { if (!Motion.GenieMinimize(h)) N.ShowWindow(h, 6); }
             catch (Exception ex) { Program.Log(ex); N.ShowWindow(h, 6); }
         }
 
         // devuelve true si hizo la animacion (y la ventana se restaura al final)
         public static bool Restore(IntPtr h)
         {
-            KeyValuePair<Bitmap, Rectangle> kv;
-            if (!Enabled || TargetFor == null || !shots.TryGetValue(h, out kv)) return false;
-            shots.Remove(h);
-            try
-            {
-                var fx = new GenieForm(kv.Key, kv.Value, TargetFor(h), true);
-                fx.FormClosed += (o, e) =>
-                {
-                    SystemAnim(false);
-                    N.ShowWindow(h, 9); N.SetForegroundWindow(h);
-                    var t = new System.Windows.Forms.Timer { Interval = 250 };
-                    t.Tick += (o2, e2) => { t.Stop(); t.Dispose(); SystemAnim(true); };
-                    t.Start();
-                    kv.Key.Dispose();
-                };
-                fx.Show();
-                return true;
-            }
+            if (!Enabled || TargetFor == null) return false;
+            try { return Motion.GenieRestore(h); }
             catch (Exception ex) { Program.Log(ex); return false; }
-        }
-
-        static void Remember(IntPtr h, Bitmap shot, Rectangle frame)
-        {
-            KeyValuePair<Bitmap, Rectangle> old;
-            if (shots.TryGetValue(h, out old)) old.Key.Dispose();
-            shots[h] = new KeyValuePair<Bitmap, Rectangle>(shot, frame);
-            if (shots.Count > 24)   // no guardar capturas de ventanas que ya no existen
-                foreach (var k in new List<IntPtr>(shots.Keys)) if (!N.IsIconic(k)) { shots[k].Key.Dispose(); shots.Remove(k); }
         }
 
         public static void RestoreAnimOnExit()
         {
-            if (animOff > 0) { animOff = 1; SystemAnim(true); }
             SetGlobal(false);
-            if (hook != IntPtr.Zero) { UnhookWinEvent(hook); hook = IntPtr.Zero; }
+            Motion.Uninstall();
         }
 
-        // ---- todas las minimizaciones del sistema (boton de Windows, Win+abajo, barra propia de la app) ----
-        delegate void WinEventProc(IntPtr hook, uint ev, IntPtr hwnd, int obj, int child, uint thread, uint time);
-        [System.Runtime.InteropServices.DllImport("user32.dll")] static extern IntPtr SetWinEventHook(uint min, uint max, IntPtr mod, WinEventProc proc, uint pid, uint tid, uint flags);
-        [System.Runtime.InteropServices.DllImport("user32.dll")] static extern bool UnhookWinEvent(IntPtr h);
-        [System.Runtime.InteropServices.DllImport("user32.dll")] static extern bool GetWindowPlacement(IntPtr h, ref WINDOWPLACEMENT wp);
-        [System.Runtime.InteropServices.StructLayout(System.Runtime.InteropServices.LayoutKind.Sequential)]
-        struct WINDOWPLACEMENT { public int length, flags, showCmd; public N.POINT ptMin, ptMax; public N.RECT rcNormal; }
-        static WinEventProc proc; static IntPtr hook;
-        static readonly Dictionary<IntPtr, DateTime> ours = new Dictionary<IntPtr, DateTime>();
         static bool globalOff; static int globalSaved = 1;
 
-        // Mientras MacDock corre, la animacion de minimizar de Windows se apaga (sin guardarlo) para que solo se vea la de Mac
+        // Mientras MacDock corre, las animaciones de minimizar y maximizar de Windows se apagan (sin guardarlo)
+        // para que solo se vean las de Mac
         public static void SetGlobal(bool macOnly)
         {
             var ai = new ANIMATIONINFO { cbSize = 8 };
-            if (macOnly && !globalOff) { SpiAnim(0x48, 8, ref ai, 0); globalSaved = ai.iMinAnimate; ai.iMinAnimate = 0; SpiAnim(0x49, 8, ref ai, 0); globalOff = true; savedAnim = 0; }
-            else if (!macOnly && globalOff) { ai.iMinAnimate = globalSaved; SpiAnim(0x49, 8, ref ai, 0); globalOff = false; savedAnim = globalSaved; }
+            if (macOnly && !globalOff) { SpiAnim(0x48, 8, ref ai, 0); globalSaved = ai.iMinAnimate; ai.iMinAnimate = 0; SpiAnim(0x49, 8, ref ai, 0); globalOff = true; }
+            else if (!macOnly && globalOff) { ai.iMinAnimate = globalSaved; SpiAnim(0x49, 8, ref ai, 0); globalOff = false; }
         }
 
         public static void Install()
         {
-            if (hook == IntPtr.Zero) { proc = OnMinimize; hook = SetWinEventHook(0x0016, 0x0016, IntPtr.Zero, proc, 0, 0, 0x0002); }
+            Motion.DockTarget = TargetFor;
+            Motion.Enabled = Enabled;
+            Motion.Install();
             SetGlobal(Enabled);
-        }
-
-        static void OnMinimize(IntPtr hk, uint ev, IntPtr h, int obj, int child, uint thread, uint time)
-        {
-            try
-            {
-                if (!Enabled || obj != 0 || h == IntPtr.Zero || TargetFor == null) return;
-                DateTime t; if (ours.TryGetValue(h, out t) && (DateTime.Now - t).TotalSeconds < 1.5) return;   // ya animada por MacDock
-                if (!MacButtons.Eligible(h) && (N.GetWindowLong(h, -16) & 0x00C00000) != 0x00C00000) return;
-                // rectangulo que tenia antes de minimizarse (coordenadas de area de trabajo -> pantalla)
-                var wp = new WINDOWPLACEMENT { length = System.Runtime.InteropServices.Marshal.SizeOf(typeof(WINDOWPLACEMENT)) };
-                if (!GetWindowPlacement(h, ref wp)) return;
-                var scr = Screen.FromHandle(h);
-                Rectangle from;
-                if ((wp.flags & 2) != 0) from = scr.WorkingArea;   // estaba maximizada
-                else
-                {
-                    // las coordenadas de area de trabajo se cuentan desde el area de trabajo del monitor principal
-                    var pr = Screen.PrimaryScreen; int ox = pr.WorkingArea.Left - pr.Bounds.Left, oy = pr.WorkingArea.Top - pr.Bounds.Top;
-                    from = new Rectangle(wp.rcNormal.left + ox, wp.rcNormal.top + oy, wp.rcNormal.right - wp.rcNormal.left, wp.rcNormal.bottom - wp.rcNormal.top);
-                }
-                if (from.Width < 60 || from.Height < 60) return;
-                new ScaleFx(h, from, TargetFor(h)).Show();
-            }
-            catch (Exception ex) { Program.Log(ex); }
-        }
-    }
-
-    // Efecto de escala de macOS con la miniatura en vivo que mantiene Windows (DWM): para minimizaciones que no pasan por MacDock
-    class ScaleFx : Form
-    {
-        [System.Runtime.InteropServices.DllImport("dwmapi.dll")] static extern int DwmRegisterThumbnail(IntPtr dest, IntPtr src, out IntPtr thumb);
-        [System.Runtime.InteropServices.DllImport("dwmapi.dll")] static extern int DwmUnregisterThumbnail(IntPtr thumb);
-        [System.Runtime.InteropServices.DllImport("dwmapi.dll")] static extern int DwmUpdateThumbnailProperties(IntPtr thumb, ref THUMBPROPS p);
-        [System.Runtime.InteropServices.StructLayout(System.Runtime.InteropServices.LayoutKind.Sequential)]
-        struct THUMBPROPS { public int dwFlags; public N.RECT rcDestination, rcSource; public byte opacity; public int fVisible, fSourceClientAreaOnly; }
-
-        readonly IntPtr src; readonly Rectangle from, to; IntPtr thumb; VsyncTimer anim; Stopwatch clk = new Stopwatch();
-        const double Dur = 0.34;
-
-        public ScaleFx(IntPtr src, Rectangle from, Rectangle to)
-        {
-            this.src = src; this.from = from; this.to = to;
-            FormBorderStyle = FormBorderStyle.None; ShowInTaskbar = false; StartPosition = FormStartPosition.Manual;
-            BackColor = Color.Black; Bounds = new Rectangle(from.X, from.Y, 1, 1);   // crece cuando la miniatura ya esta lista
-            anim = new VsyncTimer(this); anim.Tick += (o, e) => Frame();
-        }
-
-        protected override CreateParams CreateParams { get { var cp = base.CreateParams; cp.ExStyle |= 0x20 | 0x80 | 0x8000000 | 0x8; return cp; } }
-        protected override bool ShowWithoutActivation { get { return true; } }
-
-        protected override void OnShown(EventArgs e)
-        {
-            base.OnShown(e);
-            if (DwmRegisterThumbnail(Handle, src, out thumb) != 0) { Close(); return; }
-            Update2(0);
-            clk.Start(); anim.Start();
-        }
-
-        void Update2(float t)
-        {
-            float k = 1 - (1 - t) * (1 - t);   // ease-out
-            var r = new Rectangle((int)(from.X + (to.X - from.X) * k), (int)(from.Y + (to.Y - from.Y) * k),
-                Math.Max(2, (int)(from.Width + (to.Width - from.Width) * k)), Math.Max(2, (int)(from.Height + (to.Height - from.Height) * k)));
-            N.SetWindowPos(Handle, new IntPtr(-1), r.X, r.Y, r.Width, r.Height, 0x0010);
-            var p = new THUMBPROPS { dwFlags = 0x1 | 0x4 | 0x8 | 0x10, rcDestination = new N.RECT { left = 0, top = 0, right = r.Width, bottom = r.Height }, opacity = (byte)(255 * (1 - t * 0.35f)), fVisible = 1, fSourceClientAreaOnly = 0 };
-            DwmUpdateThumbnailProperties(thumb, ref p);
-        }
-
-        void Frame()
-        {
-            double p = clk.Elapsed.TotalSeconds / Dur;
-            if (p >= 1) { anim.Stop(); Close(); return; }
-            Update2((float)p);
-        }
-
-        protected override void Dispose(bool disposing)
-        {
-            if (disposing) { anim.Close(); if (thumb != IntPtr.Zero) { DwmUnregisterThumbnail(thumb); thumb = IntPtr.Zero; } }
-            base.Dispose(disposing);
-        }
-    }
-
-    class GenieForm : Form
-    {
-        readonly Bitmap img; readonly Rectangle src, dst; readonly bool reverse;
-        readonly Rectangle box; LayeredCanvas canvas; VsyncTimer anim; Stopwatch clk = new Stopwatch();
-        const double Dur = 0.52;   // duracion del genio en macOS (aprox.)
-        const int Strips = 64;
-
-        public GenieForm(Bitmap img, Rectangle src, Rectangle dst, bool reverse)
-        {
-            this.img = img; this.src = src; this.dst = dst; this.reverse = reverse;
-            box = Rectangle.Union(src, dst); box.Inflate(4, 4);
-            FormBorderStyle = FormBorderStyle.None; ShowInTaskbar = false; StartPosition = FormStartPosition.Manual;
-            Bounds = box;
-            anim = new VsyncTimer(this); anim.Tick += (o, e) => Frame();
-        }
-
-        protected override CreateParams CreateParams { get { var cp = base.CreateParams; cp.ExStyle |= 0x80000 | 0x20 | 0x80 | 0x8000000 | 0x8; return cp; } }
-        protected override bool ShowWithoutActivation { get { return true; } }
-
-        protected override void OnShown(EventArgs e)
-        {
-            canvas = new LayeredCanvas(box.Width, box.Height);
-            Draw(reverse ? 1f : 0f);
-            base.OnShown(e);
-            clk.Start(); anim.Start();
-        }
-
-        void Frame()
-        {
-            double p = clk.Elapsed.TotalSeconds / Dur;
-            if (p >= 1) { anim.Stop(); Close(); return; }
-            Draw((float)(reverse ? 1 - p : p));
-        }
-
-        static float Smooth(float x) { x = x < 0 ? 0 : x > 1 ? 1 : x; return x * x * (3 - 2 * x); }
-
-        // t = 0: ventana completa; t = 1: dentro del icono.
-        // Cada franja horizontal avanza con retraso segun su altura: la parte de abajo se estira primero hacia el icono
-        // formando el embudo, y el resto de la ventana pasa despues por el (como el genio de macOS).
-        void Draw(float t)
-        {
-            float sx = src.Left - box.Left, sy = src.Top - box.Top, sw = src.Width, sh = src.Height;
-            float tx = dst.Left - box.Left, ty = dst.Top - box.Top, tw = dst.Width, th = dst.Height;
-            bool down = dst.Top + dst.Height / 2 >= src.Top + src.Height / 2;
-            int strips = Math.Max(64, Math.Min(220, src.Height / 4));
-            const float lag = 0.62f;
-            using (var g = Graphics.FromImage(canvas.Bitmap))
-            {
-                g.Clear(Color.Transparent);
-                g.InterpolationMode = InterpolationMode.Bilinear;
-                g.PixelOffsetMode = PixelOffsetMode.None;
-                g.CompositingQuality = CompositingQuality.HighSpeed;
-                float ih = img.Height / (float)strips;
-                int prevBottom = int.MinValue;
-                using (var clamp = new System.Drawing.Imaging.ImageAttributes())
-                {
-                    clamp.SetWrapMode(System.Drawing.Drawing2D.WrapMode.TileFlipXY);
-                    for (int i = 0; i < strips; i++)
-                    {
-                        float v0 = i / (float)strips, v1 = (i + 1) / (float)strips;
-                        // si el dock estuviera arriba, lidera la parte superior
-                        float lead0 = down ? 1 - v0 : v0, lead1 = down ? 1 - v1 : v1;
-                        float q0 = Smooth(t * (1 + lag) - lead0 * lag), q1 = Smooth(t * (1 + lag) - lead1 * lag);
-                        float y0 = (sy + v0 * sh) + ((ty + v0 * th) - (sy + v0 * sh)) * q0;
-                        float y1 = (sy + v1 * sh) + ((ty + v1 * th) - (sy + v1 * sh)) * q1;
-                        float k = Smooth((q0 + q1) / 2 * 1.35f);
-                        float l = sx + (tx - sx) * k, r = sx + sw + (tx + tw - sx - sw) * k;
-                        // franjas contiguas en pixeles enteros: nunca queda una rendija
-                        int top = prevBottom == int.MinValue ? (int)Math.Round(y0) : prevBottom;
-                        int bottom = (int)Math.Round(y1);
-                        if (bottom <= top) continue;   // franja comprimida a menos de un pixel: la siguiente la cubre
-                        prevBottom = bottom;
-                        int xl = (int)Math.Round(l), xr = (int)Math.Round(r);
-                        if (xr <= xl) continue;
-                        g.DrawImage(img, new Rectangle(xl, top, xr - xl, bottom - top), 0, i * ih, img.Width, ih, GraphicsUnit.Pixel, clamp);
-                    }
-                }
-            }
-            canvas.Push(Handle, box.Left, box.Top);
-        }
-
-        protected override void Dispose(bool disposing)
-        {
-            if (disposing) { anim.Close(); if (canvas != null) { canvas.Dispose(); canvas = null; } if (!reverse) { } }
-            base.Dispose(disposing);
         }
     }
 }

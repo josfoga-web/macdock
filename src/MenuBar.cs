@@ -887,42 +887,11 @@ namespace MacDock
         }
 
         // ---------- movimiento suave de ventanas (como el acomodo de macOS) ----------
-        // Un hilo propio mueve la ventana en cada refresco de la pantalla (hasta 180 Hz en tu Nitro).
-        [DllImport("dwmapi.dll")] static extern int DwmFlush();
-        static int animGen;
-
+        // La anima Motion con la imagen en vivo de la ventana: la app se redimensiona una sola vez, no en cada cuadro.
         internal static void AnimateBounds(IntPtr h, int x, int y, int w, int hh)
         {
-            N.RECT cur;
-            if (!N.GetWindowRect(h, out cur) || SystemInformation.TerminalServerSession) { SetWindowBoundsCompensated(h, x, y, w, hh); return; }
-            N.RECT ext; int dL = 0, dT = 0, dR = 0, dB = 0;
-            if (N.DwmGetWindowAttribute(h, 9, out ext, 16) == 0)
-            {
-                dL = ext.left - cur.left; dT = ext.top - cur.top; dR = cur.right - ext.right; dB = cur.bottom - ext.bottom;
-                if (dL < 0 || dL >= 32 || dR < 0 || dR >= 32 || dB < 0 || dB >= 32) { dL = dT = dR = dB = 0; }
-            }
-            int tx = x - dL, ty = y - dT, tw = w + dL + dR, th = hh + dT + dB;
-            int sx = cur.left, sy = cur.top, sw = cur.right - cur.left, sh = cur.bottom - cur.top;
-            int gen = System.Threading.Interlocked.Increment(ref animGen);
-            var t = new System.Threading.Thread(() =>
-            {
-                try
-                {
-                    var clock = Stopwatch.StartNew(); const double dur = 0.26;
-                    while (gen == animGen)
-                    {
-                        double p = clock.Elapsed.TotalSeconds / dur;
-                        if (p >= 1) break;
-                        float k = Ease.OutCubic(p);
-                        N.SetWindowPos(h, IntPtr.Zero, (int)Math.Round(sx + (tx - sx) * k), (int)Math.Round(sy + (ty - sy) * k),
-                            (int)Math.Round(sw + (tw - sw) * k), (int)Math.Round(sh + (th - sh) * k), 0x0004 | 0x0010 | 0x0100 | 0x0200);
-                        if (DwmFlush() != 0) System.Threading.Thread.Sleep(6);
-                    }
-                    if (gen == animGen) N.SetWindowPos(h, IntPtr.Zero, tx, ty, tw, th, 0x0004 | 0x0010);
-                }
-                catch (Exception ex) { Program.Log(ex); }
-            }) { IsBackground = true, Name = "MacDockTile" };
-            t.Start();
+            if (N.IsZoomed(h)) N.ShowWindow(h, 9);
+            Motion.MoveResize(h, new Rectangle(x, y, w, hh));
         }
 
         // ---------- reservar el espacio arriba (como Mac) ----------

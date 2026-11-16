@@ -1978,7 +1978,7 @@ namespace MacDock
             addOpt("Agitar el mouse para agrandar el puntero", cfg.ShakeCursor, () => { cfg.ShakeCursor = !cfg.ShakeCursor; cfg.Save(); SetShake(cfg.ShakeCursor); });
             addOpt("Atajos para acomodar ventanas (Ctrl+Alt+flechas, F, C)", cfg.TileKeys, () => { cfg.TileKeys = !cfg.TileKeys; cfg.Save(); SetTileKeys(cfg.TileKeys); });
             addOpt("Ventanas gelatina al moverlas (ondulación)", cfg.Wobbly, () => { cfg.Wobbly = !cfg.Wobbly; cfg.Save(); global::MacDock.Wobbly.Enabled = cfg.Wobbly; });
-            addOpt("Efecto genio al minimizar (como macOS)", cfg.GenieFx, () => { cfg.GenieFx = !cfg.GenieFx; cfg.Save(); global::MacDock.Genie.Enabled = cfg.GenieFx; global::MacDock.Genie.SetGlobal(cfg.GenieFx); });
+            addOpt("Animaciones de ventanas de macOS (genio y zoom)", cfg.GenieFx, () => { cfg.GenieFx = !cfg.GenieFx; cfg.Save(); global::MacDock.Genie.Enabled = cfg.GenieFx; global::MacDock.Motion.Enabled = cfg.GenieFx; global::MacDock.Genie.SetGlobal(cfg.GenieFx); });
             var desk = new ToolStripMenuItem("Escritorio estilo Mac");
             Action<string, Action> addDesk = (txt, act) => { var mi = new ToolStripMenuItem(txt); mi.Click += (o, e) => { try { act(); } catch (Exception ex) { Program.Log(ex); } }; desk.DropDownItems.Add(mi); };
             if (!global::MacDock.DesktopStyle.Applied)

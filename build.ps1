@@ -55,7 +55,7 @@ $man = $man -replace 'assemblyIdentity version="[^"]*"', "assemblyIdentity versi
 $manGen = Join-Path $build "app.g.manifest"
 Set-Content -Path $manGen -Value $man -Encoding UTF8
 
-$cs = "Native.cs", "Dock.cs", "Setup.cs", "Saver.cs", "Stack.cs", "MenuBar.cs", "Ui.cs", "FileOps.cs", "QuickLook.cs", "Spotlight.cs", "Finder.cs", "MacButtons.cs", "ShellMenu.cs", "SysToggles.cs", "MacIcon.cs", "Smooth.cs", "EdgeTiler.cs", "Extras.cs" | ForEach-Object { Join-Path $src $_ }
+$cs = "Native.cs", "Dock.cs", "Setup.cs", "Saver.cs", "Stack.cs", "MenuBar.cs", "Ui.cs", "FileOps.cs", "QuickLook.cs", "Spotlight.cs", "Finder.cs", "MacButtons.cs", "ShellMenu.cs", "SysToggles.cs", "MacIcon.cs", "Smooth.cs", "EdgeTiler.cs", "Extras.cs", "Motion.cs" | ForEach-Object { Join-Path $src $_ }
 $cs += $aiGen
 $res = @(
     "/resource:$src\ajustes.ps1,ajustes.ps1",
