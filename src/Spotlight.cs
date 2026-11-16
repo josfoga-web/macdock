@@ -94,7 +94,7 @@ namespace MacDock
             int dark = light ? 0 : 1; DwmSetWindowAttribute(Handle, 20, ref dark, 4);
         }
 
-        protected override void OnShown(EventArgs e) { base.OnShown(e); box.Focus(); }
+        protected override void OnShown(EventArgs e) { base.OnShown(e); Glass.Apply(this, 14f * DeviceDpi / 96f); box.Focus(); }
         protected override void OnDeactivate(EventArgs e) { base.OnDeactivate(e); Close(); }
 
         // ---------- indice de apps (menu Inicio + escritorio) ----------

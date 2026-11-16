@@ -1138,6 +1138,8 @@ namespace MacDock
             get { var cp = base.CreateParams; cp.ExStyle |= 0x80; cp.ClassStyle |= 0x20000; return cp; }
         }
 
+        protected override void OnShown(EventArgs e) { base.OnShown(e); Glass.Apply(this, 16f * DeviceDpi / 96f); }
+
         protected override void OnHandleCreated(EventArgs e)
         {
             base.OnHandleCreated(e);

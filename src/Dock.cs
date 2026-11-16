@@ -108,6 +108,9 @@ namespace MacDock
         public bool BarAutoHide = true;
         public bool EdgeTiling = true;
         public bool LiveDrag = true;
+        public bool Glass = true;
+        public bool ShakeCursor = true;
+        public bool TileKeys = true;
         public bool MacTitles = true;
         string path;
 
@@ -143,6 +146,9 @@ namespace MacDock
                 else if (k == "barautohide") BarAutoHide = v == "1";
                 else if (k == "edgetiling") EdgeTiling = v == "1";
                 else if (k == "livedrag") LiveDrag = v == "1";
+                else if (k == "glass") Glass = v == "1";
+                else if (k == "shakecursor") ShakeCursor = v == "1";
+                else if (k == "tilekeys") TileKeys = v == "1";
                 else if (k == "mactitles") MacTitles = v == "1";
                 else if (k == "devicemode" && int.TryParse(v, out i)) DeviceMode = Math.Max(0, Math.Min(2, i));
                 else if (k == "gamingmode") GamingMode = v == "1";
@@ -184,6 +190,9 @@ namespace MacDock
                     "BarAutoHide=" + (BarAutoHide ? 1 : 0) + "\r\n" +
                     "EdgeTiling=" + (EdgeTiling ? 1 : 0) + "\r\n" +
                     "LiveDrag=" + (LiveDrag ? 1 : 0) + "\r\n" +
+                    "Glass=" + (Glass ? 1 : 0) + "\r\n" +
+                    "ShakeCursor=" + (ShakeCursor ? 1 : 0) + "\r\n" +
+                    "TileKeys=" + (TileKeys ? 1 : 0) + "\r\n" +
                     "MacTitles=" + (MacTitles ? 1 : 0) + "\r\n" +
                     "DeviceMode=" + DeviceMode + "\r\n" +
                     "GamingMode=" + (GamingMode ? 1 : 0) + "\r\n" +
@@ -306,6 +315,9 @@ namespace MacDock
             inputTimer.Start();
             AllowDrop = true;
             global::MacDock.MacButtons.MacTitles = cfg.MacTitles;
+            global::MacDock.Glass.Enabled = cfg.Glass;
+            SetShake(cfg.ShakeCursor);
+            SetTileKeys(cfg.TileKeys);
             SetMacButtons(cfg.MacButtons);
             SetDesktopMenu(cfg.DesktopMenu);
             WatchDownloads();
@@ -326,6 +338,26 @@ namespace MacDock
                 else if (!on && liveDragChanged) { SpiSetPtr(0x0025, 0, IntPtr.Zero, 3); liveDragChanged = false; }
             }
             catch (Exception ex) { Program.Log(ex); }
+        }
+
+        CursorShake shake;
+        void SetShake(bool on)
+        {
+            if (on && shake == null) { shake = new CursorShake(s); shake.Show(); }
+            else if (!on && shake != null) { shake.Close(); shake.Dispose(); shake = null; }
+        }
+
+        // Atajos para acomodar la ventana activa, como Fn+Control+flechas de macOS Sequoia:
+        // Ctrl+Alt+flechas = mitades, Ctrl+Alt+F = llenar, Ctrl+Alt+C = centrar
+        static readonly int[] tileVk = { 0x25, 0x27, 0x26, 0x28, 0x46, 0x43 };
+        static readonly int[] tileMode = { 1, 2, 3, 4, 10, 9 };
+        void SetTileKeys(bool on)
+        {
+            for (int i = 0; i < tileVk.Length; i++)
+            {
+                UnregisterHotKey(Handle, 30 + i);
+                if (on) RegisterHotKey(Handle, 30 + i, 0x0002 | 0x0001 | 0x4000, tileVk[i]);
+            }
         }
 
         global::MacDock.MacButtons macBtns;
@@ -1807,6 +1839,9 @@ namespace MacDock
             addOpt("Acomodar ventanas arrastrándolas a los bordes (macOS)", cfg.EdgeTiling, () => { cfg.EdgeTiling = !cfg.EdgeTiling; cfg.Save(); if (cfg.EdgeTiling) EdgeTiler.Start(s); else EdgeTiler.Stop(); });
             addOpt("Mover ventanas con su contenido (como Mac)", cfg.LiveDrag, () => { cfg.LiveDrag = !cfg.LiveDrag; cfg.Save(); SetLiveDrag(cfg.LiveDrag); });
             addOpt("Barra de título estilo Mac (puntos a la izquierda)", cfg.MacTitles, () => { cfg.MacTitles = !cfg.MacTitles; cfg.Save(); global::MacDock.MacButtons.MacTitles = cfg.MacTitles; SetMacButtons(false); SetMacButtons(cfg.MacButtons); });
+            addOpt("Transparencia estilo macOS (menús y paneles)", cfg.Glass, () => { cfg.Glass = !cfg.Glass; cfg.Save(); global::MacDock.Glass.Enabled = cfg.Glass; });
+            addOpt("Agitar el mouse para agrandar el puntero", cfg.ShakeCursor, () => { cfg.ShakeCursor = !cfg.ShakeCursor; cfg.Save(); SetShake(cfg.ShakeCursor); });
+            addOpt("Atajos para acomodar ventanas (Ctrl+Alt+flechas, F, C)", cfg.TileKeys, () => { cfg.TileKeys = !cfg.TileKeys; cfg.Save(); SetTileKeys(cfg.TileKeys); });
             addOpt("Efecto lupa", cfg.Magnify, () => { cfg.Magnify = !cfg.Magnify; cfg.Save(); Relayout(); });
             addOpt("Vista previa de ventanas al pasar el mouse", cfg.WindowPreviews, () => { cfg.WindowPreviews = !cfg.WindowPreviews; cfg.Save(); if (!cfg.WindowPreviews) ClosePreview(); });
             addOpt("Soporte multi-monitor (dock y barra superior)", cfg.MultiMonitor, () =>
@@ -2149,6 +2184,12 @@ namespace MacDock
         protected override void WndProc(ref Message m)
         {
             if (m.Msg == 0x0312 && m.WParam.ToInt32() == 7) { Spotlight.Toggle(light, s); return; }
+            if (m.Msg == 0x0312 && m.WParam.ToInt32() >= 30 && m.WParam.ToInt32() < 30 + tileVk.Length)
+            {
+                IntPtr fg = N.GetForegroundWindow(); string fc = fg == IntPtr.Zero ? "" : N.ClassOf(fg);
+                if (fg != IntPtr.Zero && fg != Handle && fc != "Progman" && fc != "WorkerW" && fc != "Shell_TrayWnd") MenuBar.TileWindow(fg, tileMode[m.WParam.ToInt32() - 30]);
+                return;
+            }
             if (m.Msg == 0x0312 && m.WParam.ToInt32() == 8)
             {
                 if (QuickLook.IsOpenAndFocused()) QuickLook.Toggle(null, light);
@@ -2193,6 +2234,7 @@ namespace MacDock
             try { StopMacFeatures(); } catch { }
             try { EdgeTiler.Stop(); } catch { }
             try { if (liveDragChanged) SetLiveDrag(false); } catch { }
+            try { SetShake(false); SetTileKeys(false); } catch { }
             try { if (bar != null) { bar.Close(); bar = null; } } catch { }
             try { UnregisterAppBar(); } catch { }
             try

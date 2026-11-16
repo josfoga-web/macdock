@@ -176,3 +176,73 @@ namespace MacDock
         public static float Approach(float cur, float target, float dt, float tau) { return cur + (target - cur) * (1 - (float)Math.Exp(-dt / tau)); }
     }
 }
+
+namespace MacDock
+{
+    // Vidrio estilo macOS: desenfoque de lo que hay detras (composicion de Windows) + ventana algo translucida
+    // y esquinas redondeadas. Se usa en menus y paneles propios.
+    static class Glass
+    {
+        [StructLayout(LayoutKind.Sequential)] struct AccentPolicy { public int State, Flags, Color, Anim; }
+        [StructLayout(LayoutKind.Sequential)] struct WinCompAttr { public int Attr; public IntPtr Data; public int Size; }
+        [DllImport("user32.dll")] static extern int SetWindowCompositionAttribute(IntPtr h, ref WinCompAttr d);
+
+        public static bool Enabled = true;
+        public const double Opacity = 0.92;
+
+        public static bool Blur(IntPtr h)
+        {
+            if (!Enabled || h == IntPtr.Zero) return false;
+            try
+            {
+                var acc = new AccentPolicy { State = 3 };
+                int size = Marshal.SizeOf(acc); IntPtr ptr = Marshal.AllocHGlobal(size);
+                try
+                {
+                    Marshal.StructureToPtr(acc, ptr, false);
+                    var d = new WinCompAttr { Attr = 19, Data = ptr, Size = size };
+                    return SetWindowCompositionAttribute(h, ref d) != 0;
+                }
+                finally { Marshal.FreeHGlobal(ptr); }
+            }
+            catch { return false; }
+        }
+
+        // una ventana translucida pierde el redondeo de Windows 11, asi que se recorta con una region redondeada
+        public static void RoundRegion(Control c, float radius)
+        {
+            if (c.Width <= 0 || c.Height <= 0) return;
+            using (var p = new GraphicsPath())
+            {
+                float d = radius * 2; var r = new RectangleF(0, 0, c.Width, c.Height);
+                p.AddArc(r.X, r.Y, d, d, 180, 90); p.AddArc(r.Right - d, r.Y, d, d, 270, 90);
+                p.AddArc(r.Right - d, r.Bottom - d, d, d, 0, 90); p.AddArc(r.X, r.Bottom - d, d, d, 90, 90);
+                p.CloseFigure();
+                var old = c.Region; c.Region = new Region(p); if (old != null) old.Dispose();
+            }
+        }
+
+        // aplica el vidrio a un formulario propio (panel, buscador): aparece con un fundido corto
+        public static void Apply(Form f, float radius)
+        {
+            if (!Enabled) return;
+            try
+            {
+                f.Opacity = 0;
+                Blur(f.Handle);
+                RoundRegion(f, radius);
+                f.Resize += (o, e) => RoundRegion(f, radius);
+                var clock = Stopwatch.StartNew();
+                var t = new System.Windows.Forms.Timer { Interval = 8 };
+                t.Tick += (o, e) =>
+                {
+                    double p = clock.Elapsed.TotalSeconds / 0.14;
+                    try { if (!f.IsDisposed) f.Opacity = Opacity * Ease.OutCubic(p); } catch { }
+                    if (p >= 1 || f.IsDisposed) { t.Stop(); t.Dispose(); }
+                };
+                t.Start();
+            }
+            catch { }
+        }
+    }
+}

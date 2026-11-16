@@ -48,7 +48,14 @@ namespace MacDock
                     }
                 }
             };
-            d.Opened += (o, e) => { Round(d.Handle, light); Fade(d, 0f, 1f, 0.12, null); };
+            d.Opened += (o, e) =>
+            {
+                Round(d.Handle, light);
+                float target = 1f;
+                // vidrio de macOS: lo de atras se ve desenfocado a traves del menu
+                if (Glass.Enabled && Glass.Blur(d.Handle)) { target = (float)Glass.Opacity; Glass.RoundRegion(d, 9f * d.DeviceDpi / 96f); }
+                Fade(d, 0f, target, 0.12, null);
+            };
             if (d is ContextMenuStrip)
             {
                 bool closingNow = false;
@@ -213,7 +220,7 @@ namespace MacDock
         public MacRenderer(bool lightTheme) : base(new ProfessionalColorTable())
         {
             light = lightTheme;
-            bg = light ? Color.FromArgb(246, 246, 248) : Color.FromArgb(40, 40, 44);
+            bg = light ? Color.FromArgb(242, 242, 245) : Color.FromArgb(36, 36, 40);
             fg = light ? Color.FromArgb(28, 28, 30) : Color.FromArgb(236, 236, 240);
             dim = light ? Color.FromArgb(150, 150, 156) : Color.FromArgb(120, 120, 128);
             sel = Color.FromArgb(10, 122, 255);
