@@ -103,6 +103,7 @@ namespace MacDock
         {
             if (paused == p) return;
             paused = p;
+            Diag(N.GetForegroundWindow(), p ? "PAUSA: se detecto pantalla completa, botones ocultos" : "fin de la pausa");
             foreach (var kv in overlays.ToList()) { if (p) kv.Value.Hide2(); else kv.Value.Place(kv.Key == active); }
         }
 
@@ -132,7 +133,10 @@ namespace MacDock
 
         void Ensure(IntPtr h)
         {
-            if (overlays.ContainsKey(h) || !Eligible(h)) return;
+            if (overlays.ContainsKey(h)) return;
+            string why = WhyNot(h);
+            if (why != null) { if (why != "invisible" && why != "no es ventana principal" && N.TitleOf(h) != "") Diag(h, "SIN botones: " + why); return; }
+            Diag(h, "con botones");
             var ov = new ButtonOverlay(h);
             overlays[h] = ov; lock (tracked) tracked.Add(h);
             ov.Show();
@@ -153,20 +157,40 @@ namespace MacDock
                 if (!IsWindow(h) || !N.IsWindowVisible(h) || overlays[h].IsDisposed) Remove(h);
         }
 
-        public static bool Eligible(IntPtr h)
+        public static bool Eligible(IntPtr h) { return WhyNot(h) == null; }
+
+        // null = la ventana lleva botones de Mac; si no, el motivo (para el registro de diagnostico)
+        public static string WhyNot(IntPtr h)
         {
-            if (h == IntPtr.Zero || !N.IsWindowVisible(h)) return false;
-            if (GetAncestor(h, 2) != h) return false;
-            uint pid; N.GetWindowThreadProcessId(h, out pid); if (pid == MyPid) return false;
+            if (h == IntPtr.Zero || !N.IsWindowVisible(h)) return "invisible";
+            if (GetAncestor(h, 2) != h) return "no es ventana principal";
+            uint pid; N.GetWindowThreadProcessId(h, out pid); if (pid == MyPid) return "es de MacDock";
             int st = N.GetWindowLong(h, -16), ex = N.GetWindowLong(h, -20);
-            if ((st & 0x20000) == 0 && (st & 0x10000) == 0) return false;
-            if ((st & 0x40000) == 0 && (st & 0x00C00000) != 0x00C00000) return false;
-            if ((ex & 0x80) != 0) return false;
-            int cloaked; if (DwmGetWindowAttribute(h, 14, out cloaked, 4) == 0 && cloaked != 0) return false;
+            if ((st & 0x20000) == 0 && (st & 0x10000) == 0) return "sin minimizar ni maximizar";
+            if ((st & 0x40000) == 0 && (st & 0x00C00000) != 0x00C00000) return "sin borde ni barra de titulo";
+            if ((ex & 0x80) != 0) return "ventana de herramientas";
+            int cloaked; if (DwmGetWindowAttribute(h, 14, out cloaked, 4) == 0 && cloaked != 0) return "oculta por Windows (cloaked)";
             string c = N.ClassOf(h);
-            if (c == "Progman" || c == "WorkerW" || c == "Shell_TrayWnd" || c == "Windows.UI.Core.CoreWindow" || c == "XamlExplorerHostIslandWindow" || c == "#32770") return false;
-            return true;
+            if (c == "Progman" || c == "WorkerW" || c == "Shell_TrayWnd" || c == "Windows.UI.Core.CoreWindow" || c == "XamlExplorerHostIslandWindow" || c == "#32770") return "ventana del sistema";
+            return null;
         }
+
+        // ---- registro de diagnostico: %LOCALAPPDATA%\MacDock\botones.log ----
+        public static string LogFile { get { return System.IO.Path.Combine(Program.DataDir, "botones.log"); } }
+        static int logLines; static readonly HashSet<string> logged = new HashSet<string>();
+        public static void Diag(IntPtr h, string what)
+        {
+            try
+            {
+                if (logLines > 600) return;
+                string key = h + "|" + what; lock (logged) { if (!logged.Add(key)) return; }
+                string line = DateTime.Now.ToString("HH:mm:ss") + "  [" + N.ClassOf(h) + "] \"" + Short(N.TitleOf(h)) + "\"  " + what;
+                if (logLines++ == 0) System.IO.File.WriteAllText(LogFile, "MacDock - diagnostico de botones rojo/amarillo/verde (" + DateTime.Now + ")\r\n");
+                System.IO.File.AppendAllText(LogFile, line + "\r\n");
+            }
+            catch { }
+        }
+        static string Short(string t) { return t.Length > 50 ? t.Substring(0, 47) + "..." : t; }
 
         protected override void OnFormClosing(FormClosingEventArgs e)
         {
@@ -255,11 +279,13 @@ namespace MacDock
             try
             {
                 IntPtr h = target;
-                if (!MacButtons.Eligible(h) || N.IsIconic(h)) { Hide2(); return; }
+                if (N.IsIconic(h)) { Hide2(); return; }
+                string why = MacButtons.WhyNot(h);
+                if (why != null) { MacButtons.Diag(h, "oculto: " + why); Hide2(); return; }
                 isActive = activeWin;
                 N.RECT fr; if (DwmGetWindowAttribute(h, 9, out fr, 16) != 0) N.GetWindowRect(h, out fr);
                 var scr = Screen.FromHandle(h);
-                if (!N.IsZoomed(h) && fr.left <= scr.Bounds.Left && fr.top <= scr.Bounds.Top && fr.right >= scr.Bounds.Right && fr.bottom >= scr.Bounds.Bottom && (N.GetWindowLong(h, -16) & 0x00C00000) != 0x00C00000) { Hide2(); return; }
+                if (!N.IsZoomed(h) && fr.left <= scr.Bounds.Left && fr.top <= scr.Bounds.Top && fr.right >= scr.Bounds.Right && fr.bottom >= scr.Bounds.Bottom && (N.GetWindowLong(h, -16) & 0x00C00000) != 0x00C00000) { MacButtons.Diag(h, "oculto: parece pantalla completa"); Hide2(); return; }
                 float dpi = 1f; try { dpi = N.GetDpiForWindow(h) / 96f; } catch { }
                 s = dpi;
                 N.RECT cb = new N.RECT(), wr; N.GetWindowRect(h, out wr);
@@ -283,7 +309,8 @@ namespace MacDock
                     int w = (int)(138 * dpi), hh = (int)((tall ? 46 : chromeLike ? 37 : 31) * dpi);
                     a = new Rectangle(fr.right - w, fr.top + 1, w - 1, hh);
                 }
-                if (a.Width < 40 || a.Height < 14 || fr.right - fr.left < 300) { Hide2(); return; }
+                if (a.Width < 40 || a.Height < 14 || fr.right - fr.left < 300) { MacButtons.Diag(h, "oculto: ventana o zona de botones muy pequena (" + a + ")"); Hide2(); return; }
+                MacButtons.Diag(h, (MacTitle ? "barra Mac" : chromeLike ? "botones sobre app tipo Chrome" : "botones a la derecha") + " (" + a.Width + "x" + a.Height + ")");
                 // Solo se movio: mover la capa sin redibujar ni leer la pantalla (lo que causaba el lag)
                 if (drawn && a.Size == area.Size && activeWin == drawnActive && N.IsWindowVisible(Handle))
                 {

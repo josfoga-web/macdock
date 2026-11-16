@@ -1947,6 +1947,27 @@ namespace MacDock
             addOpt("Agitar el mouse para agrandar el puntero", cfg.ShakeCursor, () => { cfg.ShakeCursor = !cfg.ShakeCursor; cfg.Save(); SetShake(cfg.ShakeCursor); });
             addOpt("Atajos para acomodar ventanas (Ctrl+Alt+flechas, F, C)", cfg.TileKeys, () => { cfg.TileKeys = !cfg.TileKeys; cfg.Save(); SetTileKeys(cfg.TileKeys); });
             addOpt("Efecto genio al minimizar (como macOS)", cfg.GenieFx, () => { cfg.GenieFx = !cfg.GenieFx; cfg.Save(); global::MacDock.Genie.Enabled = cfg.GenieFx; global::MacDock.Genie.SetGlobal(cfg.GenieFx); });
+            addOpt("Diagnóstico de botones (abrir registro)", false, () => { if (File.Exists(global::MacDock.MacButtons.LogFile)) Process.Start("notepad.exe", "\"" + global::MacDock.MacButtons.LogFile + "\""); else MessageBox.Show("Todavia no hay registro. Activa \"Botones de Mac en todas las ventanas\" y abre algunas apps.", "MacDock"); });
+            var desk = new ToolStripMenuItem("Escritorio estilo Mac");
+            Action<string, Action> addDesk = (txt, act) => { var mi = new ToolStripMenuItem(txt); mi.Click += (o, e) => { try { act(); } catch (Exception ex) { Program.Log(ex); } }; desk.DropDownItems.Add(mi); };
+            if (!global::MacDock.DesktopStyle.Applied)
+                addDesk("Iconos estilo Mac en los accesos directos", () => { int ok, bad; global::MacDock.DesktopStyle.ApplyIcons(out ok, out bad); MessageBox.Show(ok + " iconos cambiados" + (bad > 0 ? ", " + bad + " no se pudieron (los del escritorio publico piden permisos)" : "") + ".\nPuedes volver a los originales desde este mismo menu.", "MacDock"); });
+            else
+            {
+                addDesk("Actualizar iconos estilo Mac (accesos nuevos)", () => { int ok, bad; global::MacDock.DesktopStyle.ApplyIcons(out ok, out bad); });
+                addDesk("Restaurar iconos originales", () => global::MacDock.DesktopStyle.RestoreIcons());
+            }
+            addDesk(global::MacDock.DesktopStyle.BinHidden ? "Mostrar la papelera en el escritorio" : "Quitar la papelera del escritorio (ya esta en el dock)", () => global::MacDock.DesktopStyle.HideBin(!global::MacDock.DesktopStyle.BinHidden));
+            addDesk(global::MacDock.DesktopStyle.ArrowsRemoved ? "Volver a mostrar flechas de acceso directo (pide permiso)" : "Quitar flechas de acceso directo (pide permiso de administrador)", () =>
+            {
+                bool rem = !global::MacDock.DesktopStyle.ArrowsRemoved;
+                global::MacDock.DesktopStyle.RemoveArrows(rem);
+                if (MessageBox.Show("Para ver el cambio hay que reiniciar el Explorador de Windows (se cierran sus ventanas). ¿Reiniciarlo ahora?", "MacDock", MessageBoxButtons.YesNo) == DialogResult.Yes)
+                {
+                    foreach (var p in Process.GetProcessesByName("explorer")) try { p.Kill(); } catch { }
+                }
+            });
+            opts.DropDownItems.Add(desk);
             addOpt("Efecto lupa", cfg.Magnify, () => { cfg.Magnify = !cfg.Magnify; cfg.Save(); Relayout(); });
             addOpt("Vista previa de ventanas al pasar el mouse", cfg.WindowPreviews, () => { cfg.WindowPreviews = !cfg.WindowPreviews; cfg.Save(); if (!cfg.WindowPreviews) ClosePreview(); });
             addOpt("Soporte multi-monitor (dock y barra superior)", cfg.MultiMonitor, () =>

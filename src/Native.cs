@@ -248,6 +248,37 @@ namespace MacDock
             Marshal.ReleaseComObject(link);
         }
 
+        // icono que muestra un acceso directo (para guardarlo antes de cambiarlo)
+        public static bool GetLnkIcon(string lnk, out string path, out int index)
+        {
+            path = ""; index = 0;
+            var link = (IShellLinkW)new CShellLink();
+            try
+            {
+                ((IPersistFile)link).Load(lnk, 0);
+                var sb = new StringBuilder(1024); int i;
+                link.GetIconLocation(sb, sb.Capacity, out i);
+                path = sb.ToString(); index = i;
+                return true;
+            }
+            catch { return false; }
+            finally { Marshal.ReleaseComObject(link); }
+        }
+
+        public static bool SetLnkIcon(string lnk, string path, int index)
+        {
+            var link = (IShellLinkW)new CShellLink();
+            try
+            {
+                ((IPersistFile)link).Load(lnk, 2);   // STGM_READWRITE
+                link.SetIconLocation(path, index);
+                ((IPersistFile)link).Save(lnk, true);
+                return true;
+            }
+            catch { return false; }
+            finally { Marshal.ReleaseComObject(link); }
+        }
+
         public static void CreateLnkArgs(string lnk, string target, string args)
         {
             var link = (IShellLinkW)new CShellLink();

@@ -470,3 +470,141 @@ namespace MacDock
         }
     }
 }
+
+namespace MacDock
+{
+    // Escritorio limpio estilo Mac: iconos squircle en los accesos directos (con respaldo para restaurar),
+    // papelera fuera del escritorio (ya esta en el dock) y sin las flechas de acceso directo.
+    static class DesktopStyle
+    {
+        [System.Runtime.InteropServices.DllImport("shell32.dll")] static extern void SHChangeNotify(int ev, int flags, IntPtr a, IntPtr b);
+        static string Dir { get { return System.IO.Path.Combine(Program.DataDir, "IconosEscritorio"); } }
+        static string BackupFile { get { return System.IO.Path.Combine(Dir, "respaldo.txt"); } }
+        const string BinGuid = "{645FF040-5081-101B-9F08-00AA002F954E}";
+
+        static IEnumerable<string> Shortcuts()
+        {
+            foreach (var d in new[] { Environment.GetFolderPath(Environment.SpecialFolder.DesktopDirectory), Environment.GetFolderPath(Environment.SpecialFolder.CommonDesktopDirectory) })
+            {
+                if (string.IsNullOrEmpty(d) || !System.IO.Directory.Exists(d)) continue;
+                foreach (var f in System.IO.Directory.GetFiles(d, "*.lnk")) yield return f;
+            }
+        }
+
+        public static bool Applied { get { return System.IO.File.Exists(BackupFile); } }
+
+        // devuelve cuantos se cambiaron y cuantos no se pudieron (los del escritorio publico piden permisos)
+        public static void ApplyIcons(out int done, out int failed)
+        {
+            done = 0; failed = 0;
+            System.IO.Directory.CreateDirectory(Dir);
+            var backup = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+            if (System.IO.File.Exists(BackupFile))
+                foreach (var line in System.IO.File.ReadAllLines(BackupFile)) { int i = line.IndexOf('|'); if (i > 0) backup[line.Substring(0, i)] = line.Substring(i + 1); }
+            foreach (var lnk in Shortcuts())
+            {
+                try
+                {
+                    string ip; int ii;
+                    if (!Shell.GetLnkIcon(lnk, out ip, out ii)) { failed++; continue; }
+                    if (ip.StartsWith(Dir, StringComparison.OrdinalIgnoreCase)) continue;   // ya tiene el estilo Mac
+                    var raw = Shell.GetIcon(lnk, 256);
+                    if (raw == null) { failed++; continue; }
+                    var tile = MacIcon.Tile(raw, 256);
+                    string name = System.IO.Path.GetFileNameWithoutExtension(lnk);
+                    foreach (var c in System.IO.Path.GetInvalidFileNameChars()) name = name.Replace(c, '_');
+                    string ico = System.IO.Path.Combine(Dir, name + "-" + (lnk.GetHashCode() & 0xFFFF).ToString("x4") + ".ico");
+                    SaveIco(tile, ico);
+                    if (!backup.ContainsKey(lnk)) backup[lnk] = ip + "|" + ii;
+                    if (Shell.SetLnkIcon(lnk, ico, 0)) done++; else failed++;
+                }
+                catch (Exception ex) { failed++; Program.Log(ex); }
+            }
+            var lines = new List<string>(); foreach (var kv in backup) lines.Add(kv.Key + "|" + kv.Value);
+            System.IO.File.WriteAllLines(BackupFile, lines.ToArray());
+            Refresh();
+        }
+
+        public static void RestoreIcons()
+        {
+            if (!System.IO.File.Exists(BackupFile)) return;
+            foreach (var line in System.IO.File.ReadAllLines(BackupFile))
+            {
+                var p = line.Split('|'); if (p.Length < 3) continue;
+                int idx; int.TryParse(p[2], out idx);
+                try { if (System.IO.File.Exists(p[0])) Shell.SetLnkIcon(p[0], p[1], idx); } catch { }
+            }
+            try { System.IO.File.Delete(BackupFile); } catch { }
+            Refresh();
+        }
+
+        public static bool BinHidden
+        {
+            get
+            {
+                using (var k = Microsoft.Win32.Registry.CurrentUser.OpenSubKey(@"Software\Microsoft\Windows\CurrentVersion\Explorer\HideDesktopIcons\NewStartPanel"))
+                    return k != null && Convert.ToInt32(k.GetValue(BinGuid, 0)) == 1;
+            }
+        }
+
+        public static void HideBin(bool hide)
+        {
+            using (var k = Microsoft.Win32.Registry.CurrentUser.CreateSubKey(@"Software\Microsoft\Windows\CurrentVersion\Explorer\HideDesktopIcons\NewStartPanel"))
+                k.SetValue(BinGuid, hide ? 1 : 0, Microsoft.Win32.RegistryValueKind.DWord);
+            Refresh();
+        }
+
+        // Las flechas son una opcion de todo el equipo (HKLM): Windows pide permiso de administrador una vez.
+        public static void RemoveArrows(bool remove)
+        {
+            string blank = System.IO.Path.Combine(Program.DataDir, "sin-flecha.ico");
+            if (remove)
+                using (var b = new Bitmap(32, 32, System.Drawing.Imaging.PixelFormat.Format32bppArgb)) SaveIco(b, blank);
+            string key = @"HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Explorer\Shell Icons";
+            string cmd = remove
+                ? "New-Item -Path '" + key + "' -Force | Out-Null; Set-ItemProperty -Path '" + key + "' -Name '29' -Value '" + blank.Replace("'", "''") + ",0'"
+                : "Remove-ItemProperty -Path '" + key + "' -Name '29' -ErrorAction SilentlyContinue";
+            var psi = new ProcessStartInfo(System.IO.Path.Combine(Environment.SystemDirectory, @"WindowsPowerShell\v1.0\powershell.exe"),
+                "-NoProfile -ExecutionPolicy Bypass -WindowStyle Hidden -Command \"" + cmd + "\"") { Verb = "runas", UseShellExecute = true, WindowStyle = ProcessWindowStyle.Hidden };
+            try { using (var p = Process.Start(psi)) p.WaitForExit(15000); } catch (System.ComponentModel.Win32Exception) { return; }   // el usuario cancelo el permiso
+            Refresh();
+        }
+
+        public static bool ArrowsRemoved
+        {
+            get
+            {
+                using (var k = Microsoft.Win32.Registry.LocalMachine.OpenSubKey(@"SOFTWARE\Microsoft\Windows\CurrentVersion\Explorer\Shell Icons"))
+                    return k != null && k.GetValue("29") != null;
+            }
+        }
+
+        static void Refresh() { try { SHChangeNotify(0x08000000, 0, IntPtr.Zero, IntPtr.Zero); } catch { } }
+
+        // ICO con imagenes PNG (256, 64, 48, 32 y 16 px), como los que usa Windows
+        public static void SaveIco(Bitmap src, string file)
+        {
+            int[] sizes = { 256, 64, 48, 32, 16 };
+            var pngs = new List<byte[]>();
+            foreach (int sz in sizes)
+                using (var b = new Bitmap(sz, sz, System.Drawing.Imaging.PixelFormat.Format32bppArgb))
+                {
+                    using (var g = Graphics.FromImage(b)) { g.InterpolationMode = InterpolationMode.HighQualityBicubic; g.PixelOffsetMode = PixelOffsetMode.HighQuality; g.DrawImage(src, 0, 0, sz, sz); }
+                    using (var ms = new System.IO.MemoryStream()) { b.Save(ms, System.Drawing.Imaging.ImageFormat.Png); pngs.Add(ms.ToArray()); }
+                }
+            using (var fs = new System.IO.FileStream(file, System.IO.FileMode.Create))
+            using (var w = new System.IO.BinaryWriter(fs))
+            {
+                w.Write((short)0); w.Write((short)1); w.Write((short)sizes.Length);
+                int offset = 6 + 16 * sizes.Length;
+                for (int i = 0; i < sizes.Length; i++)
+                {
+                    w.Write((byte)(sizes[i] >= 256 ? 0 : sizes[i])); w.Write((byte)(sizes[i] >= 256 ? 0 : sizes[i]));
+                    w.Write((byte)0); w.Write((byte)0); w.Write((short)1); w.Write((short)32);
+                    w.Write(pngs[i].Length); w.Write(offset); offset += pngs[i].Length;
+                }
+                foreach (var p in pngs) w.Write(p);
+            }
+        }
+    }
+}
