@@ -190,6 +190,7 @@ namespace MacDock
         public void SetTheme(bool lightTheme)
         {
             light = lightTheme;
+            if (blurOn) Blur(true);
             Redraw(true);
             foreach (var sb in secondaryBars) sb.SetTheme(lightTheme);
         }
@@ -390,13 +391,15 @@ namespace MacDock
         {
             try
             {
-                var acc = new AccentPolicy { State = on ? 3 : 0, Flags = 0, Color = 0 };
+                // acrilico con tinte segun el tema (como la barra de macOS); si falla, desenfoque simple
+                var acc = new AccentPolicy { State = on ? 4 : 0, Flags = on ? 2 : 0, Color = light ? unchecked((int)0x30F6F4F4) : unchecked((int)0x3A1C1816) };
                 int size = Marshal.SizeOf(acc); IntPtr ptr = Marshal.AllocHGlobal(size);
                 try
                 {
                     Marshal.StructureToPtr(acc, ptr, false);
                     var d = new WinCompAttr { Attr = 19, Data = ptr, Size = size };
                     blurOn = SetWindowCompositionAttribute(Handle, ref d) != 0 && on;
+                    if (on && !blurOn) { acc.State = 3; acc.Flags = 0; acc.Color = 0; Marshal.StructureToPtr(acc, ptr, true); blurOn = SetWindowCompositionAttribute(Handle, ref d) != 0; }
                 }
                 finally { Marshal.FreeHGlobal(ptr); }
                 Redraw(true);

@@ -106,3 +106,58 @@ namespace MacDock
         }
     }
 }
+
+namespace MacDock
+{
+    // Arrastre de ventanas como en macOS: la ventana sigue al puntero 1:1 en cada refresco de la pantalla
+    // (hasta 180 Hz) y su barra de titulo estilo Mac se mueve en el mismo cuadro, sin desfase.
+    static class WindowDrag
+    {
+        [System.Runtime.InteropServices.DllImport("user32.dll")] static extern short GetAsyncKeyState(int vk);
+        [System.Runtime.InteropServices.DllImport("user32.dll")] static extern int GetSystemMetrics(int i);
+        static VsyncTimer timer; static IntPtr win, comp; static Point grab, compOff;
+
+        public static bool Active { get { return timer != null; } }
+
+        public static void Start(Control owner, IntPtr h, IntPtr companion)
+        {
+            Stop();
+            win = h; comp = companion;
+            var c = Cursor.Position;
+            N.RECT r; N.GetWindowRect(h, out r);
+            if (N.IsZoomed(h))
+            {
+                // arrastrar una ventana maximizada la restaura bajo el puntero, manteniendo la proporcion
+                float ratio = (c.X - r.left) / (float)Math.Max(1, r.right - r.left);
+                N.ShowWindow(h, 9);
+                N.GetWindowRect(h, out r);
+                int w = r.right - r.left, top = Screen.FromPoint(c).WorkingArea.Top;
+                N.SetWindowPos(h, IntPtr.Zero, c.X - (int)(w * ratio), top, 0, 0, 0x0001 | 0x0004 | 0x0010);
+                N.GetWindowRect(h, out r);
+            }
+            EdgeTiler.BeginExternal(h);   // recupera el tamano si estaba acomodada y muestra las zonas al llegar a un borde
+            N.GetWindowRect(h, out r);
+            grab = new Point(c.X - r.left, c.Y - r.top);
+            if (comp != IntPtr.Zero) { N.RECT cr; N.GetWindowRect(comp, out cr); compOff = new Point(cr.left - r.left, cr.top - r.top); }
+            timer = new VsyncTimer(owner);
+            timer.Tick += (o, e) => Tick();
+            timer.Start();
+        }
+
+        static void Tick()
+        {
+            int vk = GetSystemMetrics(23) != 0 ? 0x02 : 0x01;   // botones invertidos para zurdos
+            if ((GetAsyncKeyState(vk) & 0x8000) == 0) { var h = win; Stop(); EdgeTiler.EndExternal(h); return; }
+            var c = Cursor.Position;
+            int x = c.X - grab.X, y = Math.Max(Screen.FromPoint(c).WorkingArea.Top - grab.Y + 4, c.Y - grab.Y);
+            N.SetWindowPos(win, IntPtr.Zero, x, y, 0, 0, 0x0001 | 0x0004 | 0x0010 | 0x0200);
+            if (comp != IntPtr.Zero) N.SetWindowPos(comp, IntPtr.Zero, x + compOff.X, y + compOff.Y, 0, 0, 0x0001 | 0x0004 | 0x0010 | 0x0200);
+        }
+
+        public static void Stop()
+        {
+            if (timer == null) return;
+            timer.Stop(); timer.Close(); timer = null;
+        }
+    }
+}

@@ -53,7 +53,7 @@ namespace MacDock
                 Round(d.Handle, light);
                 float target = 1f;
                 // vidrio de macOS: lo de atras se ve desenfocado a traves del menu
-                if (Glass.Enabled && Glass.Blur(d.Handle)) { target = (float)Glass.Opacity; Glass.RoundRegion(d, 9f * d.DeviceDpi / 96f); }
+                if (Glass.Enabled && Glass.Blur(d.Handle, light ? 1 : 0)) { target = (float)Glass.Opacity; Glass.RoundRegion(d, 9f * d.DeviceDpi / 96f); }
                 Fade(d, 0f, target, 0.12, null);
             };
             if (d is ContextMenuStrip)
@@ -181,8 +181,10 @@ namespace MacDock
 
         public static void BeginDrag(Form f)
         {
+            // arrastre propio sincronizado con la pantalla (como macOS); si fallara, se usa el de Windows
+            try { WindowDrag.Start(f, f.Handle, IntPtr.Zero); return; } catch (Exception ex) { Program.Log(ex); }
             ReleaseCapture();
-            SendMessage(f.Handle, 0xA1, new IntPtr(2), IntPtr.Zero);   // WM_NCLBUTTONDOWN, HTCAPTION: Windows mueve la ventana (y la acomoda con Snap)
+            SendMessage(f.Handle, 0xA1, new IntPtr(2), IntPtr.Zero);
         }
 
         static readonly System.Collections.Generic.Dictionary<IntPtr, Rectangle> restore = new System.Collections.Generic.Dictionary<IntPtr, Rectangle>();

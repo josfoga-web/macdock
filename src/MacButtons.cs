@@ -370,11 +370,9 @@ namespace MacDock
                 N.PostMessage(target, 0x0112, new IntPtr(N.IsZoomed(target) ? 0xF120 : 0xF030), IntPtr.Zero);
                 return;
             }
-            // el resto de la barra arrastra la ventana real (Windows hace el movimiento, con su contenido)
-            var sp = PointToScreen(e.Location);
+            // el resto de la barra arrastra la ventana real, como en macOS: 1:1 y al ritmo de la pantalla
             N.SetForegroundWindow(target);
-            ReleaseCapture();
-            N.PostMessage(target, 0x00A1, new IntPtr(2), MakeLParam(sp.X, sp.Y));
+            WindowDrag.Start(this, target, Handle);
         }
 
         // Ventanas visibles de la misma app (para Option+clic)

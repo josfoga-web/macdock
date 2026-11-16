@@ -260,6 +260,7 @@ namespace MacDock
         bool loweredRefresh;
         // Modo claro/oscuro automatico y fondo dinamico (se revisa cada 30 s; no hace nada si no toca cambiar)
         DateTime lookAt = DateTime.MinValue;
+        string lastWallPeriod;
         void UpdateLook()
         {
             try
@@ -287,7 +288,13 @@ namespace MacDock
                     {
                         string cur = "";
                         using (var k = Registry.CurrentUser.OpenSubKey(@"Control Panel\Desktop")) if (k != null) cur = Convert.ToString(k.GetValue("WallPaper", ""));
-                        if (!string.Equals(cur, file, StringComparison.OrdinalIgnoreCase)) N.SpiStr(0x14, 0, file, 3);
+                        // Solo cambia de fondo cuando cambia la hora del dia, y nunca si elegiste otro fondo:
+                        // si el fondo actual no es uno de MacDock, el fondo dinamico se apaga solo y se respeta tu eleccion.
+                        string dynDir = Path.GetDirectoryName(file);
+                        bool ours = cur == "" || cur.StartsWith(dynDir, StringComparison.OrdinalIgnoreCase);
+                        if (!ours) { cfg.DynWall = false; cfg.Save(); }
+                        else if (period != lastWallPeriod && !string.Equals(cur, file, StringComparison.OrdinalIgnoreCase)) N.SpiStr(0x14, 0, file, 3);
+                        lastWallPeriod = period;
                     }
                 }
             }
@@ -1007,9 +1014,76 @@ namespace MacDock
             return b;
         }
 
+        // Iconos propios, como "Obtener informacion > icono" de macOS: un PNG o ICO en %LOCALAPPDATA%\MacDock\Iconos
+        // con el nombre de la app (o del .exe) reemplaza su icono. Se usa tal cual, asi sirven iconos estilo Mac descargados.
+        string IconsDir { get { return Path.Combine(Program.DataDir, "Iconos"); } }
+
+        string CustomIconPath(DockItem it)
+        {
+            try
+            {
+                var names = new List<string>();
+                if (!string.IsNullOrEmpty(it.Lnk)) names.Add(Path.GetFileNameWithoutExtension(it.Lnk));
+                if (!string.IsNullOrEmpty(it.Target)) names.Add(Path.GetFileNameWithoutExtension(it.Target));
+                if (!string.IsNullOrEmpty(it.Name)) names.Add(it.Name);
+                foreach (var n in names)
+                    foreach (var ext in new[] { ".png", ".ico" })
+                    {
+                        string f = Path.Combine(IconsDir, n + ext);
+                        if (File.Exists(f)) return f;
+                    }
+            }
+            catch { }
+            return null;
+        }
+
+        Bitmap LoadCustomIcon(string f)
+        {
+            string key = "custom|" + f + "|" + File.GetLastWriteTimeUtc(f).Ticks;
+            Bitmap b;
+            if (iconCache.TryGetValue(key, out b)) return b;
+            try
+            {
+                using (var src = f.EndsWith(".ico", StringComparison.OrdinalIgnoreCase) ? new Icon(f, 256, 256).ToBitmap() : new Bitmap(f))
+                {
+                    b = new Bitmap(IconPx, IconPx, PixelFormat.Format32bppArgb);
+                    using (var g = Graphics.FromImage(b))
+                    {
+                        g.InterpolationMode = InterpolationMode.HighQualityBicubic; g.PixelOffsetMode = PixelOffsetMode.HighQuality;
+                        g.DrawImage(src, 0, 0, IconPx, IconPx);
+                    }
+                }
+            }
+            catch (Exception ex) { Program.Log(ex); return null; }
+            iconCache[key] = b;
+            return b;
+        }
+
+        void ChooseIcon(DockItem it)
+        {
+            using (var dlg = new OpenFileDialog { Title = "Elegir icono para " + it.Name, Filter = "Imágenes (*.png;*.ico)|*.png;*.ico" })
+            {
+                if (dlg.ShowDialog() != DialogResult.OK) return;
+                Directory.CreateDirectory(IconsDir);
+                string name = !string.IsNullOrEmpty(it.Lnk) ? Path.GetFileNameWithoutExtension(it.Lnk) : Path.GetFileNameWithoutExtension(it.Target);
+                foreach (var ext in new[] { ".png", ".ico" }) { try { File.Delete(Path.Combine(IconsDir, name + ext)); } catch { } }
+                File.Copy(dlg.FileName, Path.Combine(IconsDir, name + Path.GetExtension(dlg.FileName).ToLowerInvariant()), true);
+            }
+            RefreshIcons();
+        }
+
+        void ResetIcon(DockItem it)
+        {
+            string f = CustomIconPath(it);
+            if (f != null) try { File.Delete(f); } catch { }
+            RefreshIcons();
+        }
+
         // icono de un acceso directo; se regenera solo si el archivo cambio
         Bitmap PinnedIcon(DockItem it)
         {
+            string custom = CustomIconPath(it);
+            if (custom != null) { var cb = LoadCustomIcon(custom); if (cb != null) return cb; }
             if (it.IsExplorer && cfg.MacIcons)
             {
                 Bitmap e; if (!iconCache.TryGetValue("::explorer", out e)) { e = MacIcon.Explorer(IconPx); iconCache["::explorer"] = e; }
@@ -1035,7 +1109,7 @@ namespace MacDock
             iconCache.Clear(); IconSizes.Clear(); startIcon = null; macShadow = null; trashMacEmpty = trashMacFull = null;
             foreach (var it in pinned) if (it.Lnk != null) it.Icon = PinnedIcon(it);
             if (trashItem != null) trashItem.Icon = TrashIcon() ?? trashItem.Icon;
-            foreach (var it in transient) if (!string.IsNullOrEmpty(it.Target)) it.Icon = IconFor(it.Target);
+            foreach (var it in transient) if (!string.IsNullOrEmpty(it.Target)) { string cip = CustomIconPath(it); it.Icon = (cip != null ? LoadCustomIcon(cip) : null) ?? IconFor(it.Target); }
             if (downloadsItem != null) downloadsItem.Icon = FolderIcon(downloadsItem.Target, 1);
             if (stackItem != null) stackItem.Icon = FolderIcon(stackItem.Target, 2);
             Render();
@@ -1213,7 +1287,8 @@ namespace MacDock
                     {
                         string name = Path.GetFileNameWithoutExtension(path);
                         try { var vi = FileVersionInfo.GetVersionInfo(path); if (!string.IsNullOrEmpty(vi.FileDescription)) name = vi.FileDescription; } catch { }
-                        it = new DockItem { Kind = Kind.App, Target = path, Name = name, Icon = IconFor(path) };
+                        it = new DockItem { Kind = Kind.App, Target = path, Name = name };
+                        string cip = CustomIconPath(it); it.Icon = (cip != null ? LoadCustomIcon(cip) : null) ?? IconFor(path);
                         if (scannedOnce) it.BornAt = DateTime.Now;   // aparece creciendo, como en macOS
                         transient.Add(it);
                     }
@@ -1244,6 +1319,7 @@ namespace MacDock
                 // se suspende todo el escaneo de ventanas, iconos y procesos en segundo plano.
                 if (fullApp && cfg.GamingMode)
                 {
+                    try { HideTaskbarIfShown(); } catch { }
                     ClosePreview();
                     if (fast.Enabled) fast.Stop();
                     return;
@@ -1762,6 +1838,9 @@ namespace MacDock
                         var order = pinned.Select(p => Path.GetFileName(p.Lnk)).ToList(); order.Add(Path.GetFileName(lnk));
                         try { File.WriteAllLines(orderFile, order); } catch { }
                     });
+                addSub("Cambiar icono...", () => ChooseIcon(it));
+                if (CustomIconPath(it) != null) addSub("Restaurar icono original", () => ResetIcon(it));
+                addSub("Abrir carpeta de iconos", () => { Directory.CreateDirectory(IconsDir); Process.Start("explorer.exe", "\"" + IconsDir + "\""); });
                 if (!string.IsNullOrEmpty(it.Target) && File.Exists(it.Target))
                     addSub("Mostrar en Finder", () => Process.Start("explorer.exe", "/select,\"" + it.Target + "\""));
                 m.Items.Add(optsApp);
@@ -2133,8 +2212,21 @@ namespace MacDock
         }
 
         // Cada 120 ms: decide si el dock se ve, se esconde, cambia de monitor o se asoma al llevar el mouse al borde inferior.
+        IntPtr trayCache;
+        void QuickTaskbarCheck()
+        {
+            if (!cfg.HideTaskbar || DateTime.Now < trayUntil) return;
+            if (trayCache == IntPtr.Zero || !N.IsWindowVisible(trayCache) && N.ClassOf(trayCache) != "Shell_TrayWnd") trayCache = N.FindWindow("Shell_TrayWnd", null);
+            if (trayCache == IntPtr.Zero || !N.IsWindowVisible(trayCache)) return;
+            IntPtr fg = N.GetForegroundWindow(); string fc = fg != IntPtr.Zero ? N.ClassOf(fg) : "";
+            // con el menu Inicio o la busqueda abiertos Windows necesita su barra un momento
+            if (fc == "Windows.UI.Core.CoreWindow" || fc == "XamlExplorerHostIslandWindow" || fc == "Shell_TrayWnd") return;
+            HideTaskbarIfShown();
+        }
+
         void EdgeTick(object sender, EventArgs e)
         {
+            if (!restored) try { QuickTaskbarCheck(); } catch { }
             if (restored || all.Count == 0) return;
             if (menuOpen || dragging || stackPopup != null) return;
             if (previewPopup != null && !previewPopup.IsDisposed)

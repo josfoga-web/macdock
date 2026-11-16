@@ -188,14 +188,22 @@ namespace MacDock
         [DllImport("user32.dll")] static extern int SetWindowCompositionAttribute(IntPtr h, ref WinCompAttr d);
 
         public static bool Enabled = true;
-        public const double Opacity = 0.92;
+        public const double Opacity = 0.86;
 
-        public static bool Blur(IntPtr h)
+        // Acrilico (desenfoque fuerte con tinte y grano, lo mas cercano al vidrio de macOS); si no esta disponible, desenfoque simple
+        public static bool Blur(IntPtr h) { return Blur(h, -1); }
+        public static bool Blur(IntPtr h, int light)
         {
             if (!Enabled || h == IntPtr.Zero) return false;
+            if (light >= 0 && Accent(h, 4, light == 1 ? unchecked((int)0x40F8F6F6) : unchecked((int)0x4A241F1E))) return true;
+            return Accent(h, 3, 0);
+        }
+
+        public static bool Accent(IntPtr h, int state, int tint)
+        {
             try
             {
-                var acc = new AccentPolicy { State = 3 };
+                var acc = new AccentPolicy { State = state, Flags = state == 4 ? 2 : 0, Color = tint };
                 int size = Marshal.SizeOf(acc); IntPtr ptr = Marshal.AllocHGlobal(size);
                 try
                 {
@@ -229,7 +237,7 @@ namespace MacDock
             try
             {
                 f.Opacity = 0;
-                Blur(f.Handle);
+                Blur(f.Handle, f.BackColor.GetBrightness() > 0.5f ? 1 : 0);
                 RoundRegion(f, radius);
                 f.Resize += (o, e) => RoundRegion(f, radius);
                 var clock = Stopwatch.StartNew();

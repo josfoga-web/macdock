@@ -354,36 +354,81 @@ namespace MacDock
             list.Items.AddRange(items.ToArray());
             list.EndUpdate();
             UpdateStatus();
-            // iconos y miniaturas en segundo plano
+            // iconos y miniaturas en segundo plano, rapido:
+            //  - carpetas normales usan el icono de carpeta ya cargado (no se le pide nada a Windows)
+            //  - archivos comunes comparten un icono por extension
+            //  - miniaturas en dos hilos y con cache por archivo
+            //  - la lista se actualiza por tandas, no una vez por archivo
             var todo = paths.ToList();
             int px = (int)(64 * s) <= 64 ? 96 : 128;
-            var th = new Thread(() =>
+            var pending = new List<KeyValuePair<int, string>>();   // indice -> clave de imagen
+            var newImgs = new Dictionary<string, Bitmap>();
+            object gate = new object();
+            int next = -1, workers = 2, alive = workers;
+            Action flush = null;
+            flush = () =>
             {
-                for (int i = 0; i < todo.Count; i++)
+                List<KeyValuePair<int, string>> batch; Dictionary<string, Bitmap> imgs;
+                lock (gate) { batch = new List<KeyValuePair<int, string>>(pending); pending.Clear(); imgs = new Dictionary<string, Bitmap>(newImgs); newImgs.Clear(); }
+                if (seq != loadSeq || IsDisposed) return;
+                if (batch.Count == 0 && imgs.Count == 0) return;
+                list.BeginUpdate();
+                foreach (var kv in imgs)
+                    if (!bigImgs.Images.ContainsKey(kv.Key)) { bigImgs.Images.Add(kv.Key, Fit(kv.Value, bigImgs.ImageSize.Width)); smallImgs.Images.Add(kv.Key, Fit(kv.Value, smallImgs.ImageSize.Width)); }
+                foreach (var kv in batch) if (kv.Key < list.Items.Count && bigImgs.Images.ContainsKey(kv.Value)) list.Items[kv.Key].ImageKey = kv.Value;
+                list.EndUpdate();
+            };
+            var flusher = new System.Windows.Forms.Timer { Interval = 70 };
+            flusher.Tick += (o, e) => { flush(); if (alive == 0 || seq != loadSeq || IsDisposed) { flush(); flusher.Stop(); flusher.Dispose(); } };
+            flusher.Start();
+            for (int w = 0; w < workers; w++)
+            {
+                var th = new Thread(() =>
                 {
-                    if (seq != loadSeq || IsDisposed) return;
-                    string p = todo[i];
-                    string ext = Path.GetExtension(p).ToLowerInvariant();
-                    bool thumb = ".png.jpg.jpeg.gif.bmp.webp.mp4.mov.mkv.avi.pdf.heic".Contains(ext) && ext != "";
-                    var bmp = Shell.GetIcon(p, px, thumb ? 0 : 4);
-                    if (bmp == null) continue;
-                    int idx = i;
                     try
                     {
-                        BeginInvoke(new Action(() =>
+                        while (true)
                         {
-                            if (seq != loadSeq || IsDisposed) { bmp.Dispose(); return; }
-                            string key = "i" + idx;
-                            bigImgs.Images.Add(key, Fit(bmp, bigImgs.ImageSize.Width));
-                            smallImgs.Images.Add(key, Fit(bmp, smallImgs.ImageSize.Width));
-                            bmp.Dispose();
-                            if (idx < list.Items.Count && (string)list.Items[idx].Tag == p) list.Items[idx].ImageKey = key;
-                        }));
+                            int i = Interlocked.Increment(ref next);
+                            if (i >= todo.Count || seq != loadSeq || IsDisposed) break;
+                            string p = todo[i];
+                            string key = IconKey(p);
+                            if (key == null) continue;                    // carpeta normal: ya tiene el icono de carpeta
+                            Bitmap shared;
+                            lock (iconMem) if (iconMem.TryGetValue(key, out shared)) { lock (gate) { if (!newImgs.ContainsKey(key)) newImgs[key] = shared; pending.Add(new KeyValuePair<int, string>(i, key)); } continue; }
+                            string ext = Path.GetExtension(p).ToLowerInvariant();
+                            bool thumb = ext != "" && ".png.jpg.jpeg.gif.bmp.webp.mp4.mov.mkv.avi.pdf.heic".Contains(ext);
+                            var bmp = Shell.GetIcon(p, px, thumb ? 0 : 4);
+                            if (bmp == null) continue;
+                            lock (iconMem) { if (iconMem.Count > 600) iconMem.Clear(); iconMem[key] = bmp; }
+                            lock (gate) { newImgs[key] = bmp; pending.Add(new KeyValuePair<int, string>(i, key)); }
+                        }
                     }
-                    catch { return; }
+                    catch { }
+                    finally { Interlocked.Decrement(ref alive); }
+                });
+                th.IsBackground = true; th.SetApartmentState(ApartmentState.STA); th.Priority = ThreadPriority.BelowNormal; th.Start();
+            }
+        }
+
+        // icono compartido entre ejecuciones (miniaturas por archivo y fecha, el resto por extension)
+        static readonly Dictionary<string, Bitmap> iconMem = new Dictionary<string, Bitmap>(StringComparer.OrdinalIgnoreCase);
+        static string IconKey(string p)
+        {
+            try
+            {
+                if (Directory.Exists(p))
+                {
+                    // solo las carpetas con icono propio (desktop.ini) o las unidades necesitan su icono real
+                    if (p.Length <= 3 || File.Exists(Path.Combine(p, "desktop.ini"))) return "d|" + p;
+                    return null;
                 }
-            });
-            th.IsBackground = true; th.SetApartmentState(ApartmentState.STA); th.Start();
+                string ext = Path.GetExtension(p).ToLowerInvariant();
+                if (ext == "" || ".exe.lnk.ico.url.cur.ani.msc.appref-ms".Contains(ext)) return "f|" + p;
+                if (".png.jpg.jpeg.gif.bmp.webp.mp4.mov.mkv.avi.pdf.heic".Contains(ext)) return "t|" + p + "|" + File.GetLastWriteTimeUtc(p).Ticks;
+                return "e|" + ext;
+            }
+            catch { return "f|" + p; }
         }
 
         static Bitmap phDir, phFile;

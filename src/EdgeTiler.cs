@@ -51,6 +51,10 @@ namespace MacDock
             if (snapWasOn) SpiSet(0x0083, 1, IntPtr.Zero, 0);
         }
 
+        // para el arrastre propio de MacDock (que no pasa por el movimiento de Windows)
+        public static void BeginExternal(IntPtr h) { if (running) try { Begin(h); } catch (Exception ex) { Program.Log(ex); } }
+        public static void EndExternal(IntPtr h) { if (running) try { End(h); } catch (Exception ex) { Program.Log(ex); } }
+
         static void OnEvent(IntPtr hk, uint ev, IntPtr h, int obj, int child, uint thread, uint time)
         {
             try
