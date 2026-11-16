@@ -179,7 +179,9 @@ namespace MacDock
 
         readonly IntPtr target;
         Rectangle area; Color bgColor = Color.Black; bool isActive, inside, drawn, drawnActive; float s = 1f;
-        Timer hoverTimer = new Timer { Interval = 60 };
+        Timer hoverTimer = new Timer { Interval = 40 };
+        int pressedIdx = -1; DateTime greenSince = DateTime.MaxValue;
+        public static TilePopover Popover;
 
         public ButtonOverlay(IntPtr target)
         {
@@ -189,7 +191,20 @@ namespace MacDock
             hoverTimer.Tick += (o, e) =>
             {
                 N.POINT p; GetCursorPos(out p);
-                if (!area.Contains(p.x, p.y)) { inside = false; hoverTimer.Stop(); Render(); }
+                if (!area.Contains(p.x, p.y)) { inside = false; greenSince = DateTime.MaxValue; hoverTimer.Stop(); Render(); return; }
+                // como en macOS: al dejar el mouse sobre el boton verde aparece el panel para acomodar la ventana
+                var org = Origin();
+                bool overGreen = TrafficLights.Hit(new PointF(p.x - area.Left, p.y - area.Top), org.X, org.Y, s) == 2;
+                if (!overGreen || pressedIdx >= 0) { greenSince = DateTime.MaxValue; return; }
+                if (greenSince == DateTime.MaxValue) greenSince = DateTime.Now;
+                else if ((DateTime.Now - greenSince).TotalMilliseconds > 550 && (Popover == null || Popover.IsDisposed || Popover.Target != target))
+                {
+                    greenSince = DateTime.MaxValue;
+                    if (Popover != null && !Popover.IsDisposed) Popover.Close();
+                    float gx = area.Left + org.X + TrafficLights.D(s) / 2 + TrafficLights.Step(s) * 2;
+                    Popover = new TilePopover(target, new Point((int)gx, (int)(area.Top + org.Y + TrafficLights.D(s) + 6 * s)), s, bgColor.GetBrightness() > 0.55f, area);
+                    Popover.Show();
+                }
             };
         }
 
@@ -256,7 +271,7 @@ namespace MacDock
                 {
                     g.Clear(bgColor);
                     var o = Origin();
-                    TrafficLights.Draw(g, o.X, o.Y, s, isActive, inside, bgColor.GetBrightness() > 0.55f);
+                    TrafficLights.Draw(g, o.X, o.Y, s, isActive, inside, bgColor.GetBrightness() > 0.55f, pressedIdx);
                 }
                 IntPtr screenDc = N.GetDC(IntPtr.Zero), memDc = N.CreateCompatibleDC(screenDc), hb = bmp.GetHbitmap(Color.FromArgb(0)), old = N.SelectObject(memDc, hb);
                 try
@@ -271,16 +286,45 @@ namespace MacDock
 
         protected override void OnMouseMove(MouseEventArgs e) { base.OnMouseMove(e); if (!inside) { inside = true; Render(); hoverTimer.Start(); } }
 
+        protected override void OnMouseDown(MouseEventArgs e)
+        {
+            base.OnMouseDown(e);
+            if (e.Button != MouseButtons.Left) return;
+            var o = Origin();
+            pressedIdx = TrafficLights.Hit(e.Location, o.X, o.Y, s);
+            if (pressedIdx >= 0) { if (Popover != null && !Popover.IsDisposed) Popover.Close(); Render(); }
+        }
+
+        // Ventanas visibles de la misma app (para Option+clic)
+        List<IntPtr> SameApp()
+        {
+            uint pid; N.GetWindowThreadProcessId(target, out pid);
+            var list = new List<IntPtr>();
+            N.EnumWindows((w, l) => { uint p2; N.GetWindowThreadProcessId(w, out p2); if (p2 == pid && MacButtons.Eligible(w)) list.Add(w); return true; }, IntPtr.Zero);
+            return list;
+        }
+
         protected override void OnMouseUp(MouseEventArgs e)
         {
             base.OnMouseUp(e);
             if (e.Button != MouseButtons.Left) return;
             var o = Origin();
-            int i = TrafficLights.Hit(e.Location, o.X, o.Y, s);
-            if (i < 0) return;
+            int i = TrafficLights.Hit(e.Location, o.X, o.Y, s), was = pressedIdx;
+            pressedIdx = -1; Render();
+            if (i < 0 || i != was) return;   // como en macOS: soltar fuera del boton cancela
             IntPtr h = target;
-            if (i == 0) N.PostMessage(h, 0x0112, new IntPtr(0xF060), IntPtr.Zero);
-            else if (i == 1) N.PostMessage(h, 0x0112, new IntPtr(0xF020), IntPtr.Zero);
+            bool option = (Control.ModifierKeys & Keys.Alt) != 0;   // Alt hace de tecla Option
+            if (i == 0)
+            {
+                if (option) foreach (var w in SameApp()) N.PostMessage(w, 0x0112, new IntPtr(0xF060), IntPtr.Zero);   // cerrar todas las ventanas de la app
+                else N.PostMessage(h, 0x0112, new IntPtr(0xF060), IntPtr.Zero);
+            }
+            else if (i == 1)
+            {
+                if (option) foreach (var w in SameApp()) N.PostMessage(w, 0x0112, new IntPtr(0xF020), IntPtr.Zero);   // minimizar todas
+                else N.PostMessage(h, 0x0112, new IntPtr(0xF020), IntPtr.Zero);
+            }
+            else if (option) MenuBar.TileWindow(h, 10);   // Option+verde: llenar la pantalla sin pantalla completa (zoom)
             else
             {
                 N.RECT fr; if (DwmGetWindowAttribute(h, 9, out fr, 16) != 0) N.GetWindowRect(h, out fr);
@@ -291,5 +335,167 @@ namespace MacDock
         }
 
         protected override void OnFormClosing(FormClosingEventArgs e) { hoverTimer.Stop(); base.OnFormClosing(e); }
+    }
+
+    // Panel que aparece al dejar el mouse sobre el boton verde (macOS Sequoia y posteriores):
+    // "Mover y redimensionar" (mitades; con Alt, cuartos), "Llenar y organizar" (llenar, centrar) y pantalla completa.
+    class TilePopover : Form
+    {
+        public readonly IntPtr Target;
+        readonly Point anchor; readonly float s; readonly bool light; readonly Rectangle buttonArea;
+        LayeredCanvas canvas; VsyncTimer anim; System.Diagnostics.Stopwatch clk = System.Diagnostics.Stopwatch.StartNew();
+        Timer watch = new Timer { Interval = 50 };
+        DateTime awaySince = DateTime.MaxValue;
+        float appear; bool closingAnim; int hover = -1, W, H;
+        readonly List<KeyValuePair<RectangleF, int>> cells = new List<KeyValuePair<RectangleF, int>>();
+        RectangleF rFull;
+
+        public TilePopover(IntPtr target, Point anchor, float s, bool light, Rectangle buttonArea)
+        {
+            Target = target; this.anchor = anchor; this.s = s; this.light = light; this.buttonArea = buttonArea;
+            FormBorderStyle = FormBorderStyle.None; ShowInTaskbar = false; StartPosition = FormStartPosition.Manual;
+            W = (int)(244 * s); H = (int)(176 * s);
+            var wa = Screen.FromPoint(anchor).WorkingArea;
+            int x = Math.Max(wa.Left + 4, Math.Min(wa.Right - W - 4, anchor.X - (int)(30 * s))), y = Math.Min(wa.Bottom - H - 4, anchor.Y);
+            Bounds = new Rectangle(x, y, W, H);
+            anim = new VsyncTimer(this); anim.Tick += (o, e) => Frame();
+            watch.Tick += (o, e) => Watch();
+        }
+
+        protected override CreateParams CreateParams { get { var cp = base.CreateParams; cp.ExStyle |= 0x80000 | 0x80 | 0x8000000 | 0x8; return cp; } }
+        protected override bool ShowWithoutActivation { get { return true; } }
+
+        protected override void OnShown(EventArgs e) { base.OnShown(e); clk.Restart(); anim.Start(); watch.Start(); }
+
+        void Frame()
+        {
+            double p = clk.Elapsed.TotalSeconds / (closingAnim ? 0.1 : 0.16);
+            appear = closingAnim ? 1f - Ease.OutCubic(p) : Ease.OutCubic(p);
+            Draw();
+            if (p >= 1) { anim.Stop(); if (closingAnim) Close(); }
+        }
+
+        void Watch()
+        {
+            var c = Cursor.Position;
+            if (Bounds.Contains(c) || buttonArea.Contains(c)) { awaySince = DateTime.MaxValue; int hv = HitAt(new PointF(c.X - Left, c.Y - Top)); if (hv != hover) { hover = hv; Draw(); } return; }
+            if (hover != -1) { hover = -1; Draw(); }
+            if (awaySince == DateTime.MaxValue) awaySince = DateTime.Now;
+            else if ((DateTime.Now - awaySince).TotalMilliseconds > 320) FadeAway();
+        }
+
+        void FadeAway() { if (closingAnim) return; closingAnim = true; watch.Stop(); clk.Restart(); anim.Start(); }
+
+        int HitAt(PointF p)
+        {
+            foreach (var kv in cells) if (kv.Key.Contains(p)) return kv.Value;
+            if (rFull.Contains(p)) return 100;
+            return -1;
+        }
+
+        void Draw()
+        {
+            if (IsDisposed) return;
+            if (canvas == null) canvas = new LayeredCanvas(W, H);
+            bool alt = (Control.ModifierKeys & Keys.Alt) != 0;
+            Color bg = light ? Color.FromArgb(246, 248, 248, 250) : Color.FromArgb(244, 38, 38, 42);
+            Color fg = light ? Color.FromArgb(30, 30, 32) : Color.FromArgb(238, 238, 242);
+            Color dim = light ? Color.FromArgb(130, 130, 136) : Color.FromArgb(150, 150, 158);
+            Color accent = Color.FromArgb(10, 122, 255);
+            cells.Clear();
+            using (var g = Graphics.FromImage(canvas.Bitmap))
+            {
+                g.Clear(Color.Transparent);
+                g.SmoothingMode = System.Drawing.Drawing2D.SmoothingMode.AntiAlias;
+                g.TextRenderingHint = System.Drawing.Text.TextRenderingHint.AntiAlias;
+                float k = 0.96f + 0.04f * appear;   // aparece creciendo un poco desde el boton
+                g.TranslateTransform(30 * s, 0); g.ScaleTransform(k, k); g.TranslateTransform(-30 * s, 0);
+                int a = (int)(255 * appear);
+                var panel = new RectangleF(6 * s, 4 * s, W - 12 * s, H - 12 * s);
+                for (int i = 4; i >= 1; i--)
+                    using (var sp = Rr(new RectangleF(panel.X - i * s, panel.Y - i * s + 2 * s, panel.Width + 2 * i * s, panel.Height + 2 * i * s), (12 + i) * s))
+                    using (var b = new SolidBrush(Color.FromArgb(a * 9 / 255, 0, 0, 0))) g.FillPath(b, sp);
+                using (var pp = Rr(panel, 12 * s))
+                {
+                    using (var b = new SolidBrush(Color.FromArgb(a * bg.A / 255, bg))) g.FillPath(b, pp);
+                    using (var pen = new Pen(Color.FromArgb(a * (light ? 40 : 70) / 255, light ? Color.Black : Color.White), Math.Max(1f, 0.8f * s))) g.DrawPath(pen, pp);
+                }
+                using (var fT = new Font(UiFont.Semi, 11f * s, FontStyle.Regular, GraphicsUnit.Pixel))
+                using (var fR = new Font(UiFont.Reg, 13f * s, FontStyle.Regular, GraphicsUnit.Pixel))
+                using (var dimB = new SolidBrush(Color.FromArgb(a, dim))) using (var fgB = new SolidBrush(Color.FromArgb(a, fg)))
+                {
+                    float x0 = panel.X + 12 * s, y = panel.Y + 10 * s, cw = 42 * s, ch = 28 * s, gap = 10 * s;
+                    g.DrawString("Mover y redimensionar", fT, dimB, x0, y); y += 18 * s;
+                    int[] row1 = alt ? new[] { 5, 6, 7, 8 } : new[] { 1, 2, 3, 4 };
+                    for (int i = 0; i < 4; i++) Cell(g, new RectangleF(x0 + i * (cw + gap), y, cw, ch), row1[i], a, fg, accent);
+                    y += ch + 14 * s;
+                    g.DrawString("Llenar y organizar", fT, dimB, x0, y); y += 18 * s;
+                    Cell(g, new RectangleF(x0, y, cw, ch), 10, a, fg, accent);
+                    Cell(g, new RectangleF(x0 + cw + gap, y, cw, ch), 9, a, fg, accent);
+                    y += ch + 10 * s;
+                    using (var pen = new Pen(Color.FromArgb(a * 40 / 255, fg))) g.DrawLine(pen, panel.X + 10 * s, y, panel.Right - 10 * s, y);
+                    y += 4 * s;
+                    rFull = new RectangleF(panel.X + 6 * s, y, panel.Width - 12 * s, 22 * s);
+                    if (hover == 100) using (var hp = Rr(rFull, 6 * s)) using (var b = new SolidBrush(Color.FromArgb(a, accent))) g.FillPath(b, hp);
+                    g.DrawString(N.IsZoomed(Target) ? "Salir de pantalla completa" : "Pantalla completa", fR, hover == 100 ? new SolidBrush(Color.FromArgb(a, 255, 255, 255)) : fgB, rFull.X + 8 * s, rFull.Y + 3 * s);
+                }
+            }
+            canvas.Push(Handle, Left, Top);
+        }
+
+        // miniatura de pantalla con la zona destino resaltada
+        void Cell(Graphics g, RectangleF r, int mode, int a, Color fg, Color accent)
+        {
+            cells.Add(new KeyValuePair<RectangleF, int>(r, mode));
+            bool hv = hover == mode;
+            using (var p = Rr(r, 5 * s))
+            {
+                using (var b = new SolidBrush(Color.FromArgb(a * (hv ? 40 : 18) / 255, hv ? accent : fg))) g.FillPath(b, p);
+                using (var pen = new Pen(Color.FromArgb(a * (hv ? 255 : 90) / 255, hv ? accent : fg), Math.Max(1f, 1.1f * s))) g.DrawPath(pen, p);
+            }
+            float ins = 3 * s; var z = new RectangleF(r.X + ins, r.Y + ins, r.Width - ins * 2, r.Height - ins * 2);
+            float hw = (z.Width - 2 * s) / 2, hh = (z.Height - 2 * s) / 2;
+            RectangleF f;
+            switch (mode)
+            {
+                case 1: f = new RectangleF(z.X, z.Y, hw, z.Height); break;
+                case 2: f = new RectangleF(z.Right - hw, z.Y, hw, z.Height); break;
+                case 3: f = new RectangleF(z.X, z.Y, z.Width, hh); break;
+                case 4: f = new RectangleF(z.X, z.Bottom - hh, z.Width, hh); break;
+                case 5: f = new RectangleF(z.X, z.Y, hw, hh); break;
+                case 6: f = new RectangleF(z.Right - hw, z.Y, hw, hh); break;
+                case 7: f = new RectangleF(z.X, z.Bottom - hh, hw, hh); break;
+                case 8: f = new RectangleF(z.Right - hw, z.Bottom - hh, hw, hh); break;
+                case 9: f = new RectangleF(z.X + z.Width * 0.18f, z.Y + z.Height * 0.15f, z.Width * 0.64f, z.Height * 0.7f); break;
+                default: f = z; break;
+            }
+            using (var fp = Rr(f, 2.5f * s)) using (var b = new SolidBrush(Color.FromArgb(a * (hv ? 255 : 150) / 255, hv ? accent : fg))) g.FillPath(b, fp);
+        }
+
+        protected override void OnMouseMove(MouseEventArgs e) { base.OnMouseMove(e); int hv = HitAt(e.Location); if (hv != hover) { hover = hv; Draw(); } }
+
+        protected override void OnMouseUp(MouseEventArgs e)
+        {
+            base.OnMouseUp(e);
+            int hv = HitAt(e.Location);
+            if (hv < 0) return;
+            if (hv == 100) N.PostMessage(Target, 0x0112, new IntPtr(N.IsZoomed(Target) ? 0xF120 : 0xF030), IntPtr.Zero);
+            else MenuBar.TileWindow(Target, hv);
+            FadeAway();
+        }
+
+        static System.Drawing.Drawing2D.GraphicsPath Rr(RectangleF r, float rad)
+        {
+            var p = new System.Drawing.Drawing2D.GraphicsPath(); float d = rad * 2;
+            p.AddArc(r.X, r.Y, d, d, 180, 90); p.AddArc(r.Right - d, r.Y, d, d, 270, 90);
+            p.AddArc(r.Right - d, r.Bottom - d, d, d, 0, 90); p.AddArc(r.X, r.Bottom - d, d, d, 90, 90);
+            p.CloseFigure(); return p;
+        }
+
+        protected override void Dispose(bool disposing)
+        {
+            if (disposing) { watch.Stop(); watch.Dispose(); anim.Close(); if (canvas != null) { canvas.Dispose(); canvas = null; } }
+            base.Dispose(disposing);
+        }
     }
 }

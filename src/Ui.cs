@@ -112,37 +112,58 @@ namespace MacDock
             return -1;
         }
 
-        public static void Draw(Graphics g, float x, float y, float s, bool active, bool glyphs, bool light)
+        public static void Draw(Graphics g, float x, float y, float s, bool active, bool glyphs, bool light) { Draw(g, x, y, s, active, glyphs, light, -1); }
+
+        // Estilo macOS 27: relleno con degradado suave, borde fino mas oscuro (vuelve el relieve) y simbolos al pasar el mouse.
+        // pressed: boton presionado (se oscurece, como en macOS)
+        public static void Draw(Graphics g, float x, float y, float s, bool active, bool glyphs, bool light, int pressed)
         {
             var old = g.SmoothingMode; g.SmoothingMode = SmoothingMode.AntiAlias;
-            Color[] fill = { Color.FromArgb(255, 95, 87), Color.FromArgb(254, 188, 46), Color.FromArgb(40, 200, 64) };
-            Color[] edge = { Color.FromArgb(224, 68, 62), Color.FromArgb(222, 161, 35), Color.FromArgb(26, 171, 41) };
-            Color[] sym = { Color.FromArgb(120, 10, 6), Color.FromArgb(150, 87, 0), Color.FromArgb(0, 100, 0) };
-            Color off = light ? Color.FromArgb(206, 206, 210) : Color.FromArgb(78, 78, 84);
-            float d = D(s);
+            Color[] top = { Color.FromArgb(255, 110, 102), Color.FromArgb(255, 200, 70), Color.FromArgb(60, 212, 84) };
+            Color[] bot = { Color.FromArgb(250, 82, 74), Color.FromArgb(250, 176, 30), Color.FromArgb(34, 190, 58) };
+            Color[] edge = { Color.FromArgb(214, 60, 54), Color.FromArgb(214, 150, 26), Color.FromArgb(24, 160, 40) };
+            Color[] sym = { Color.FromArgb(140, 18, 12), Color.FromArgb(152, 92, 0), Color.FromArgb(10, 98, 20) };
+            Color offFill = light ? Color.FromArgb(214, 214, 218) : Color.FromArgb(84, 84, 90);
+            Color offEdge = light ? Color.FromArgb(190, 190, 196) : Color.FromArgb(70, 70, 76);
+            float d = D(s), lw = Math.Max(0.8f, 0.7f * s);
             for (int i = 0; i < 3; i++)
             {
                 var r = new RectangleF(x + i * Step(s), y, d, d);
                 bool on = active || glyphs;
-                using (var b = new SolidBrush(on ? fill[i] : off)) g.FillEllipse(b, r);
-                using (var p = new Pen(on ? edge[i] : Color.FromArgb(40, 0, 0, 0), Math.Max(0.8f, 0.6f * s))) g.DrawEllipse(p, r);
+                if (on)
+                {
+                    Color t = top[i], b2 = bot[i];
+                    if (pressed == i) { t = Dark(t, 0.8f); b2 = Dark(b2, 0.8f); }
+                    using (var br = new LinearGradientBrush(new RectangleF(r.X, r.Y - 0.5f, r.Width, r.Height + 1), t, b2, 90f)) g.FillEllipse(br, r);
+                    // brillo superior muy leve
+                    var hr = new RectangleF(r.X + d * 0.2f, r.Y + d * 0.08f, d * 0.6f, d * 0.38f);
+                    using (var br = new LinearGradientBrush(new RectangleF(hr.X, hr.Y - 0.5f, hr.Width, hr.Height + 1), Color.FromArgb(70, 255, 255, 255), Color.FromArgb(0, 255, 255, 255), 90f)) g.FillEllipse(br, hr);
+                    using (var p = new Pen(pressed == i ? Dark(edge[i], 0.8f) : edge[i], lw)) g.DrawEllipse(p, r.X + lw / 2, r.Y + lw / 2, d - lw, d - lw);
+                }
+                else
+                {
+                    using (var b = new SolidBrush(offFill)) g.FillEllipse(b, r);
+                    using (var p = new Pen(offEdge, lw)) g.DrawEllipse(p, r.X + lw / 2, r.Y + lw / 2, d - lw, d - lw);
+                }
                 if (!glyphs) continue;
-                float cx = r.X + d / 2, cy = r.Y + d / 2, k = d * 0.24f;
-                using (var p = new Pen(sym[i], Math.Max(1.1f, 1.25f * s)) { StartCap = LineCap.Round, EndCap = LineCap.Round })
+                float cx = r.X + d / 2, cy = r.Y + d / 2, k = d * 0.22f;
+                using (var p = new Pen(sym[i], Math.Max(1.1f, 1.2f * s)) { StartCap = LineCap.Round, EndCap = LineCap.Round })
                 using (var b = new SolidBrush(sym[i]))
                 {
                     if (i == 0) { g.DrawLine(p, cx - k, cy - k, cx + k, cy + k); g.DrawLine(p, cx - k, cy + k, cx + k, cy - k); }
-                    else if (i == 1) g.DrawLine(p, cx - k * 1.25f, cy, cx + k * 1.25f, cy);
+                    else if (i == 1) g.DrawLine(p, cx - k * 1.3f, cy, cx + k * 1.3f, cy);
                     else
                     {   // dos triangulos en diagonal (pantalla completa de Mac)
-                        float q = k * 1.15f;
-                        g.FillPolygon(b, new[] { new PointF(cx - q, cy - q), new PointF(cx + q * 0.35f, cy - q), new PointF(cx - q, cy + q * 0.35f) });
-                        g.FillPolygon(b, new[] { new PointF(cx + q, cy + q), new PointF(cx - q * 0.35f, cy + q), new PointF(cx + q, cy - q * 0.35f) });
+                        float q = k * 1.2f;
+                        g.FillPolygon(b, new[] { new PointF(cx - q, cy - q), new PointF(cx + q * 0.4f, cy - q), new PointF(cx - q, cy + q * 0.4f) });
+                        g.FillPolygon(b, new[] { new PointF(cx + q, cy + q), new PointF(cx - q * 0.4f, cy + q), new PointF(cx + q, cy - q * 0.4f) });
                     }
                 }
             }
             g.SmoothingMode = old;
         }
+
+        static Color Dark(Color c, float k) { return Color.FromArgb(c.A, (int)(c.R * k), (int)(c.G * k), (int)(c.B * k)); }
     }
 
     // Ventana sin borde de Windows que se mueve, redimensiona y maximiza como una ventana normal (para poner los botones de Mac)

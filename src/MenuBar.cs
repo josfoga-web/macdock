@@ -283,24 +283,49 @@ namespace MacDock
                         rSearch = new RectangleF(scx - sr - 6 * s, 0, sr * 2.5f + 12 * s, H);
                         rx = scx - sr - 16 * s;
 
+                        // bateria estilo macOS 27: el porcentaje va dentro del icono
                         float pct = ps.BatteryLifePercent;
                         if (!isDesk && pct >= 0 && pct <= 1 && ps.BatteryChargeStatus != BatteryChargeStatus.NoSystemBattery)
                         {
-                            string pt = (int)Math.Round(pct * 100) + "%";
-                            float bw = 22 * s, bh = 11 * s;
-                            rx -= bw + 2 * s;
+                            bool charging = ps.PowerLineStatus == PowerLineStatus.Online;
+                            float bw = 27 * s, bh = 12.5f * s;
+                            if (charging)
+                            {
+                                // rayo a la derecha mientras carga
+                                float lx = rx - 7 * s, ly0 = cy - 6 * s;
+                                using (var lb = new SolidBrush(fg))
+                                    g.FillPolygon(lb, new[] { new PointF(lx + 4.2f * s, ly0), new PointF(lx, ly0 + 6.8f * s), new PointF(lx + 2.9f * s, ly0 + 6.8f * s),
+                                        new PointF(lx + 2.1f * s, ly0 + 12 * s), new PointF(lx + 6.6f * s, ly0 + 4.9f * s), new PointF(lx + 3.6f * s, ly0 + 4.9f * s) });
+                                rx -= 10 * s;
+                            }
+                            rx -= bw + 2.5f * s;
                             float by = cy - bh / 2;
-                            using (var pen = new Pen(dim, Math.Max(1f, 1.1f * s)))
-                            using (var path = Round(new RectangleF(rx, by, bw, bh), 3 * s)) g.DrawPath(pen, path);
-                            g.FillRectangle(dimB, rx + bw + 0.8f * s, cy - 2.2f * s, 1.6f * s, 4.4f * s);
-                            Color fill = pct <= 0.2f ? Color.FromArgb(255, 69, 58) : (ps.PowerLineStatus == PowerLineStatus.Online ? Color.FromArgb(52, 199, 89) : fg);
-                            using (var fb = new SolidBrush(fill))
-                            using (var path = Round(new RectangleF(rx + 2 * s, by + 2 * s, Math.Max(1.5f * s, (bw - 4 * s) * pct), bh - 4 * s), 1.5f * s)) g.FillPath(fb, path);
-                            var pts = g.MeasureString(pt, fReg);
-                            rx -= pts.Width + 3 * s;
-                            g.DrawString(pt, fReg, fgB, rx, cy - pts.Height / 2);
-                            rBat = new RectangleF(rx - 6 * s, 0, pts.Width + bw + 18 * s, H);
-                            rx -= 18 * s;
+                            var body = new RectangleF(rx, by, bw, bh);
+                            using (var path = Round(body, 3.8f * s))
+                            {
+                                using (var tb = new SolidBrush(Color.FromArgb(light ? 60 : 70, fg))) g.FillPath(tb, path);
+                                Color fill = pct <= 0.2f && !charging ? Color.FromArgb(255, 69, 58) : (charging ? Color.FromArgb(52, 199, 89) : fg);
+                                var lvl = new RectangleF(rx, by, Math.Max(2 * s, bw * pct), bh);
+                                var oldClip = g.Clip;
+                                g.SetClip(path); g.SetClip(lvl, CombineMode.Intersect);
+                                using (var fb = new SolidBrush(fill)) g.FillRectangle(fb, lvl);
+                                // numero: invertido sobre la parte llena y normal sobre la vacia
+                                string pt = ((int)Math.Round(pct * 100)).ToString();
+                                using (var fNum = new Font(UiFont.Semi, 9.5f * s, FontStyle.Regular, GraphicsUnit.Pixel))
+                                {
+                                    var ns = g.MeasureString(pt, fNum);
+                                    float tx = rx + (bw - ns.Width) / 2, ty = cy - ns.Height / 2 + 0.3f * s;
+                                    Color inv = fill == fg ? (light ? Color.White : Color.FromArgb(20, 20, 22)) : Color.White;
+                                    using (var ib = new SolidBrush(inv)) g.DrawString(pt, fNum, ib, tx, ty);
+                                    g.SetClip(path); g.SetClip(lvl, CombineMode.Exclude);
+                                    g.DrawString(pt, fNum, fgB, tx, ty);
+                                }
+                                g.Clip = oldClip;
+                            }
+                            using (var nb = new SolidBrush(Color.FromArgb(light ? 90 : 110, fg)))
+                            using (var np = Round(new RectangleF(rx + bw + 1 * s, cy - 2.4f * s, 1.8f * s, 4.8f * s), 0.9f * s)) g.FillPath(nb, np);
+                            rBat = new RectangleF(rx - 6 * s, 0, bw + 18 * s, H);
+                            rx -= 16 * s;
                         }
                         else rBat = RectangleF.Empty;
 
@@ -310,11 +335,29 @@ namespace MacDock
                         rVol = new RectangleF(rx - 6 * s, 0, vs.Width + 12 * s, H);
                         rx -= 16 * s;
 
-                        string netGlyph = (net && isEth) ? "\uE839" : "\uE701"; // \uE839 = Ethernet LAN, \uE701 = Wi-Fi
-                        var ws = g.MeasureString(netGlyph, fIcon); rx -= ws.Width;
-                        g.DrawString(netGlyph, fIcon, net ? fgB : dimB, rx, cy - ws.Height / 2);
-                        if (!net) using (var pen = new Pen(dim, 1.4f * s)) g.DrawLine(pen, rx, cy + ws.Height / 3, rx + ws.Width, cy - ws.Height / 3);
-                        rWifi = new RectangleF(rx - 6 * s, 0, ws.Width + 12 * s, H);
+                        if (net && isEth)
+                        {
+                            string netGlyph = "\uE839";   // Ethernet
+                            var ws = g.MeasureString(netGlyph, fIcon); rx -= ws.Width;
+                            g.DrawString(netGlyph, fIcon, fgB, rx, cy - ws.Height / 2);
+                            rWifi = new RectangleF(rx - 6 * s, 0, ws.Width + 12 * s, H);
+                        }
+                        else
+                        {
+                            // abanico de Wi-Fi como el de macOS: tres arcos y un punto
+                            float ww = 17 * s; rx -= ww;
+                            float wcx = rx + ww / 2, wby = cy + 5.6f * s;
+                            Color wc = net ? fg : Color.FromArgb(light ? 80 : 90, fg);
+                            using (var pen = new Pen(wc, Math.Max(1.2f, 1.75f * s)) { StartCap = LineCap.Round, EndCap = LineCap.Round })
+                                for (int k2 = 1; k2 <= 3; k2++)
+                                {
+                                    float rr = (2.4f + 3.6f * k2) * s;
+                                    g.DrawArc(pen, wcx - rr, wby - rr, rr * 2, rr * 2, 225, 90);
+                                }
+                            using (var db = new SolidBrush(wc)) g.FillEllipse(db, wcx - 1.6f * s, wby - 1.6f * s, 3.2f * s, 3.2f * s);
+                            if (!net) using (var pen = new Pen(fg, 1.4f * s)) g.DrawLine(pen, rx + 1 * s, cy + 6 * s, rx + ww - 1 * s, cy - 6 * s);
+                            rWifi = new RectangleF(rx - 6 * s, 0, ww + 12 * s, H);
+                        }
                         rx -= 16 * s;
 
                         // sol / luna: en oscuro muestra la luna, en claro el sol. Un clic cambia el modo.
@@ -608,7 +651,7 @@ namespace MacDock
                 Item(m, "Mover al siguiente monitor", () => MoveWindowNextScreen(h));
         }
 
-        static void TileWindow(IntPtr h, int mode)
+        internal static void TileWindow(IntPtr h, int mode)
         {
             try
             {
