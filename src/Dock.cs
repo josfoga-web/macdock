@@ -107,6 +107,8 @@ namespace MacDock
         public bool MacIcons = true;
         public bool BarAutoHide = true;
         public bool EdgeTiling = true;
+        public bool LiveDrag = true;
+        public bool MacTitles = true;
         string path;
 
         public Config(string p)
@@ -140,6 +142,8 @@ namespace MacDock
                 else if (k == "macicons") MacIcons = v == "1";
                 else if (k == "barautohide") BarAutoHide = v == "1";
                 else if (k == "edgetiling") EdgeTiling = v == "1";
+                else if (k == "livedrag") LiveDrag = v == "1";
+                else if (k == "mactitles") MacTitles = v == "1";
                 else if (k == "devicemode" && int.TryParse(v, out i)) DeviceMode = Math.Max(0, Math.Min(2, i));
                 else if (k == "gamingmode") GamingMode = v == "1";
                 else if (k == "lightfrom") { TimeSpan t; if (TimeSpan.TryParse(v, out t)) LightFrom = t; }
@@ -179,6 +183,8 @@ namespace MacDock
                     "MacIcons=" + (MacIcons ? 1 : 0) + "\r\n" +
                     "BarAutoHide=" + (BarAutoHide ? 1 : 0) + "\r\n" +
                     "EdgeTiling=" + (EdgeTiling ? 1 : 0) + "\r\n" +
+                    "LiveDrag=" + (LiveDrag ? 1 : 0) + "\r\n" +
+                    "MacTitles=" + (MacTitles ? 1 : 0) + "\r\n" +
                     "DeviceMode=" + DeviceMode + "\r\n" +
                     "GamingMode=" + (GamingMode ? 1 : 0) + "\r\n" +
                     "ReserveSpace=" + (ReserveSpace ? 1 : 0) + "\r\n" +
@@ -299,10 +305,27 @@ namespace MacDock
             inputTimer.Tick += InputTick;
             inputTimer.Start();
             AllowDrop = true;
+            global::MacDock.MacButtons.MacTitles = cfg.MacTitles;
             SetMacButtons(cfg.MacButtons);
             SetDesktopMenu(cfg.DesktopMenu);
             WatchDownloads();
             WatchTaskbarPins();
+        }
+
+        // En macOS la ventana entera se mueve con el puntero. Windows puede tener apagado
+        // "Mostrar el contenido de la ventana mientras se arrastra" y entonces solo mueve un contorno.
+        [DllImport("user32.dll", EntryPoint = "SystemParametersInfo")] static extern bool SpiGetBool(int a, int u, ref int p, int f);
+        [DllImport("user32.dll", EntryPoint = "SystemParametersInfo")] static extern bool SpiSetPtr(int a, int u, IntPtr p, int f);
+        bool liveDragChanged;
+        void SetLiveDrag(bool on)
+        {
+            try
+            {
+                int cur = 0; SpiGetBool(0x0026, 0, ref cur, 0);
+                if (on && cur == 0) { SpiSetPtr(0x0025, 1, IntPtr.Zero, 3); liveDragChanged = true; }
+                else if (!on && liveDragChanged) { SpiSetPtr(0x0025, 0, IntPtr.Zero, 3); liveDragChanged = false; }
+            }
+            catch (Exception ex) { Program.Log(ex); }
         }
 
         global::MacDock.MacButtons macBtns;
@@ -412,6 +435,7 @@ namespace MacDock
             var sm = new ShellMenu();
             if (sm.AppendTo(m.Items, Handle)) lastShellMenu = sm; else sm.Dispose();
             while (m.Items.Count > 0 && m.Items[m.Items.Count - 1] is ToolStripSeparator) m.Items.RemoveAt(m.Items.Count - 1);
+            if (m.Items.Count == 0) return;
             menuOpen = true;
             m.Closed += (o, e) => { menuOpen = false; };
             N.SetForegroundWindow(Handle);
@@ -917,6 +941,7 @@ namespace MacDock
             RefreshRunning();
             Relayout();
             if (cfg.EdgeTiling) try { EdgeTiler.Start(s); } catch (Exception ex) { Program.Log(ex); }
+            SetLiveDrag(cfg.LiveDrag);
             SetupWatcher();
             SystemEvents.PowerModeChanged += (o, a) => BeginInvoke(new Action(() => { lastPower = (PowerLineStatus)(-1); refreshCheckAt = DateTime.Now.AddSeconds(2); }));
             ApplyRefresh();
@@ -1692,11 +1717,12 @@ namespace MacDock
                     Add(m, "Apagar Docker y WSL (libera RAM y bateria)", () => StopDocker(), true);
                     m.Items.Add(new ToolStripSeparator());
                 }
-                Add(m, it.Running ? "Nueva ventana" : "Abrir", () => Launch(it), !it.Running);
+                var optsApp = new ToolStripMenuItem("Opciones");
+                Action<string, Action> addSub = (txt, act) => { var mi = new ToolStripMenuItem(txt); mi.Click += (o, e) => { try { act(); } catch (Exception ex) { Program.Log(ex); } }; optsApp.DropDownItems.Add(mi); };
                 if (it.Pinned)
-                    Add(m, "Quitar del dock", () => { try { File.Delete(it.Lnk); } catch { } });
+                    addSub("Quitar del Dock", () => { try { File.Delete(it.Lnk); } catch { } });
                 else if (it.Target != "")
-                    Add(m, "Mantener en el dock", () =>
+                    addSub("Mantener en el Dock", () =>
                     {
                         string name = string.Join("_", it.Name.Split(Path.GetInvalidFileNameChars()));
                         string lnk = Path.Combine(appsDir, name + ".lnk");
@@ -1704,12 +1730,18 @@ namespace MacDock
                         var order = pinned.Select(p => Path.GetFileName(p.Lnk)).ToList(); order.Add(Path.GetFileName(lnk));
                         try { File.WriteAllLines(orderFile, order); } catch { }
                     });
+                if (!string.IsNullOrEmpty(it.Target) && File.Exists(it.Target))
+                    addSub("Mostrar en Finder", () => Process.Start("explorer.exe", "/select,\"" + it.Target + "\""));
+                m.Items.Add(optsApp);
+                m.Items.Add(new ToolStripSeparator());
                 if (it.Running)
                 {
-                    m.Items.Add(new ToolStripSeparator());
-                    Add(m, it.Windows.Count > 1 ? "Cerrar todas las ventanas" : "Cerrar", () => { foreach (var h in it.Windows) N.PostMessage(h, 0x10, IntPtr.Zero, IntPtr.Zero); });
+                    Add(m, "Nueva ventana", () => Launch(it));
+                    Add(m, "Mostrar todas las ventanas", () => { foreach (var h in it.Windows.ToList()) { if (N.IsIconic(h)) N.ShowWindow(h, 9); N.SetForegroundWindow(h); } });
+                    Add(m, "Ocultar", () => { foreach (var h in it.Windows.ToList()) N.ShowWindow(h, 6); });
+                    Add(m, "Salir", () => { foreach (var h in it.Windows.ToList()) N.PostMessage(h, 0x10, IntPtr.Zero, IntPtr.Zero); });
                 }
-                m.Items.Add(new ToolStripSeparator());
+                else Add(m, "Abrir", () => Launch(it), true);
             }
             else if (it != null && it.Kind == Kind.Trash)
             {
@@ -1739,6 +1771,7 @@ namespace MacDock
                 m.Items.Add(new ToolStripSeparator());
             }
 
+            bool general = it == null || it.Kind == Kind.Separator || it.Kind == Kind.Start;
             var opts = new ToolStripMenuItem("Opciones del dock");
             Action<string, bool, Action> addOpt = (text, chk, act) =>
             {
@@ -1772,6 +1805,8 @@ namespace MacDock
             addOpt("Iconos estilo macOS (forma redondeada)", cfg.MacIcons, () => { cfg.MacIcons = !cfg.MacIcons; cfg.Save(); RefreshIcons(); });
             addOpt("Ocultar barra superior con ventanas maximizadas", cfg.BarAutoHide, () => { cfg.BarAutoHide = !cfg.BarAutoHide; cfg.Save(); MenuBar.AutoHideMax = cfg.BarAutoHide; });
             addOpt("Acomodar ventanas arrastrándolas a los bordes (macOS)", cfg.EdgeTiling, () => { cfg.EdgeTiling = !cfg.EdgeTiling; cfg.Save(); if (cfg.EdgeTiling) EdgeTiler.Start(s); else EdgeTiler.Stop(); });
+            addOpt("Mover ventanas con su contenido (como Mac)", cfg.LiveDrag, () => { cfg.LiveDrag = !cfg.LiveDrag; cfg.Save(); SetLiveDrag(cfg.LiveDrag); });
+            addOpt("Barra de título estilo Mac (puntos a la izquierda)", cfg.MacTitles, () => { cfg.MacTitles = !cfg.MacTitles; cfg.Save(); global::MacDock.MacButtons.MacTitles = cfg.MacTitles; SetMacButtons(false); SetMacButtons(cfg.MacButtons); });
             addOpt("Efecto lupa", cfg.Magnify, () => { cfg.Magnify = !cfg.Magnify; cfg.Save(); Relayout(); });
             addOpt("Vista previa de ventanas al pasar el mouse", cfg.WindowPreviews, () => { cfg.WindowPreviews = !cfg.WindowPreviews; cfg.Save(); if (!cfg.WindowPreviews) ClosePreview(); });
             addOpt("Soporte multi-monitor (dock y barra superior)", cfg.MultiMonitor, () =>
@@ -1838,16 +1873,36 @@ namespace MacDock
             });
             addOpt("Editar apps del dock (carpeta)", false, () => Process.Start("explorer.exe", "\"" + appsDir + "\""));
             addOpt("Importar de nuevo apps de la barra", false, () => { ImportTaskbarPins(); ScheduleReload(); });
-            Add(m, "Abrir Finder", () => Finder.OpenOrFocus(light, s));
-            Add(m, "Buscar con Spotlight (Alt + Espacio)", () => Spotlight.Toggle(light, s));
-            if (DockerRunning()) Add(m, "Apagar Docker y WSL (libera RAM y bateria)", () => StopDocker());
-            m.Items.Add(opts);
-            Add(m, "Cerrar dock y volver a la barra de Windows", () => Close());
+            if (general)
+            {
+                Add(m, "Abrir Finder", () => Finder.OpenOrFocus(light, s));
+                Add(m, "Buscar con Spotlight (Alt + Espacio)", () => Spotlight.Toggle(light, s));
+                if (DockerRunning()) Add(m, "Apagar Docker y WSL (libera RAM y bateria)", () => StopDocker());
+                m.Items.Add(opts);
+                Add(m, "Cerrar dock y volver a la barra de Windows", () => Close());
+            }
+            while (m.Items.Count > 0 && m.Items[m.Items.Count - 1] is ToolStripSeparator) m.Items.RemoveAt(m.Items.Count - 1);
+            if (m.Items.Count == 0) return;
 
             menuOpen = true;
-            m.Closed += (o, e) => { menuOpen = false; };
+            m.Closed += (o, e) => { menuOpen = false; StartAnim(); };
             N.SetForegroundWindow(Handle);
-            m.Show(Cursor.Position);
+            // En macOS el menu sale centrado encima del icono, justo sobre el dock
+            foreach (ToolStripItem ti in m.Items) ti.Padding = new Padding(8, 5, 16, 5);
+            m.PerformLayout();
+            var ps = m.PreferredSize;
+            var scr = (cfg.MultiMonitor ? curScreen : Screen.PrimaryScreen).Bounds;
+            int mx, my;
+            if (it != null && all.Contains(it))
+            {
+                float iconTop = winY + SlidePx + BarTop + PadY + Ic - Ic * it.Scale;
+                mx = (int)(winX + it.X + it.W / 2 - ps.Width / 2f);
+                my = (int)(iconTop - ps.Height - 10 * s);
+            }
+            else { mx = Cursor.Position.X - ps.Width / 2; my = (int)(winY + SlidePx + BarTop - ps.Height - 10 * s); }
+            mx = Math.Max(scr.Left + 4, Math.Min(scr.Right - ps.Width - 4, mx));
+            my = Math.Max(scr.Top + 4, my);
+            m.Show(new Point(mx, my));
         }
 
         // ---------- taskbar / appbar ----------
@@ -2137,6 +2192,7 @@ namespace MacDock
             try { nap.WakeAll(); } catch { }
             try { StopMacFeatures(); } catch { }
             try { EdgeTiler.Stop(); } catch { }
+            try { if (liveDragChanged) SetLiveDrag(false); } catch { }
             try { if (bar != null) { bar.Close(); bar = null; } } catch { }
             try { UnregisterAppBar(); } catch { }
             try

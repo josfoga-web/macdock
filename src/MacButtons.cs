@@ -21,7 +21,8 @@ namespace MacDock
         [DllImport("user32.dll")] static extern IntPtr GetAncestor(IntPtr h, int flags);
         [DllImport("dwmapi.dll")] static extern int DwmGetWindowAttribute(IntPtr h, int attr, out int v, int size);
 
-        WinEventProc proc; IntPtr hookSys, hookObj, hookLoc; uint hookThreadId;
+        WinEventProc proc; IntPtr hookSys, hookObj, hookLoc, hookName; uint hookThreadId;
+        public static bool MacTitles = true;   // barra de titulo estilo Mac (puntos a la izquierda, titulo centrado)
         [DllImport("kernel32.dll")] static extern uint GetCurrentThreadId();
         [DllImport("user32.dll")] static extern bool PostThreadMessage(uint tid, int msg, IntPtr w, IntPtr l);
         readonly HashSet<IntPtr> tracked = new HashSet<IntPtr>();      // ventanas con botones (para filtrar rapido en el hilo de eventos)
@@ -37,6 +38,12 @@ namespace MacDock
                 lock (tracked) { if (!tracked.Contains(hwnd)) return; }
                 lock (pendingMove) { pendingMove.Add(hwnd); if (moveScheduled) return; moveScheduled = true; }
                 try { BeginInvoke(new Action(FlushMoves)); } catch { }
+                return;
+            }
+            if (ev == 0x800C)
+            {
+                lock (tracked) { if (!tracked.Contains(hwnd)) return; }
+                try { BeginInvoke(new Action(() => { ButtonOverlay o2; if (overlays.TryGetValue(hwnd, out o2)) o2.TitleChanged(); })); } catch { }
                 return;
             }
             if (ev != 0x0003 && ev != 0x000A && ev != 0x000B && ev != 0x0017 && ev != 0x8000 && ev != 0x8001 && ev != 0x8002 && ev != 0x8003) return;
@@ -78,8 +85,9 @@ namespace MacDock
                 hookSys = SetWinEventHook(0x0003, 0x0017, IntPtr.Zero, proc, 0, 0, 0);
                 hookObj = SetWinEventHook(0x8000, 0x8003, IntPtr.Zero, proc, 0, 0, 0);
                 hookLoc = SetWinEventHook(0x800B, 0x800B, IntPtr.Zero, proc, 0, 0, 0);
+                hookName = SetWinEventHook(0x800C, 0x800C, IntPtr.Zero, proc, 0, 0, 0);
                 Application.Run();
-                UnhookWinEvent(hookSys); UnhookWinEvent(hookObj); UnhookWinEvent(hookLoc);
+                UnhookWinEvent(hookSys); UnhookWinEvent(hookObj); UnhookWinEvent(hookLoc); UnhookWinEvent(hookName);
             });
             th.IsBackground = true; th.SetApartmentState(System.Threading.ApartmentState.STA); th.Start();
             active = N.GetForegroundWindow();
@@ -112,7 +120,7 @@ namespace MacDock
                         if (!overlays.ContainsKey(hwnd)) Ensure(hwnd);
                         if (overlays.TryGetValue(hwnd, out ov)) ov.Place(true);
                         break;
-                    case 0x000A: if (overlays.TryGetValue(hwnd, out ov)) ov.Hide2(); break;
+                    case 0x000A: if (overlays.TryGetValue(hwnd, out ov) && !ov.MacTitle) ov.Hide2(); break;
                     case 0x000B: case 0x0017: if (overlays.TryGetValue(hwnd, out ov)) ov.Place(hwnd == active); break;
                     case 0x8002: case 0x8000: Ensure(hwnd); break;
                     case 0x8001: case 0x8003: Remove(hwnd); break;
@@ -181,6 +189,28 @@ namespace MacDock
         Rectangle area; Color bgColor = Color.Black; bool isActive, inside, drawn, drawnActive; float s = 1f;
         Timer hoverTimer = new Timer { Interval = 40 };
         int pressedIdx = -1; DateTime greenSince = DateTime.MaxValue;
+        public bool MacTitle; int macChecked; string lastTitle = "";
+        [DllImport("user32.dll")] static extern IntPtr SendMessageTimeout(IntPtr h, int msg, IntPtr w, IntPtr l, int flags, int timeout, out IntPtr res);
+        [DllImport("user32.dll")] static extern bool ReleaseCapture();
+
+        static IntPtr MakeLParam(int x, int y) { return new IntPtr((y << 16) | (x & 0xFFFF)); }
+
+        int HitTest(int x, int y)
+        {
+            IntPtr r;
+            if (SendMessageTimeout(target, 0x0084, IntPtr.Zero, MakeLParam(x, y), 0x0002, 120, out r) == IntPtr.Zero) return -1;
+            return r.ToInt32();
+        }
+
+        // ventana con la barra de titulo normal de Windows: icono (menu de sistema) a la izquierda y titulo arrastrable.
+        // Las apps con barra propia (Chrome, Explorador con pestanas, VS Code...) no pasan esta prueba y conservan los botones a la derecha.
+        bool StandardCaption(N.RECT fr, int capTop, int capH, int buttonsLeft, float dpi)
+        {
+            int cy = capTop + capH / 2;
+            return HitTest(fr.left + (int)(16 * dpi), cy) == 3 && HitTest(buttonsLeft - (int)(40 * dpi), cy) == 2;
+        }
+
+        public void TitleChanged() { if (MacTitle && N.TitleOf(target) != lastTitle) Render(); }
         public static TilePopover Popover;
 
         public ButtonOverlay(IntPtr target)
@@ -191,7 +221,7 @@ namespace MacDock
             hoverTimer.Tick += (o, e) =>
             {
                 N.POINT p; GetCursorPos(out p);
-                if (!area.Contains(p.x, p.y)) { inside = false; greenSince = DateTime.MaxValue; hoverTimer.Stop(); Render(); return; }
+                if (!area.Contains(p.x, p.y) || !OverDots(new PointF(p.x - area.Left, p.y - area.Top))) { inside = false; greenSince = DateTime.MaxValue; hoverTimer.Stop(); Render(); return; }
                 // como en macOS: al dejar el mouse sobre el boton verde aparece el panel para acomodar la ventana
                 var org = Origin();
                 bool overGreen = TrafficLights.Hit(new PointF(p.x - area.Left, p.y - area.Top), org.X, org.Y, s) == 2;
@@ -234,7 +264,15 @@ namespace MacDock
                 s = dpi;
                 N.RECT cb, wr; N.GetWindowRect(h, out wr);
                 Rectangle a;
-                if (DwmGetWindowAttribute(h, 5, out cb, 16) == 0 && cb.right - cb.left > 30 * dpi)
+                bool haveCb = DwmGetWindowAttribute(h, 5, out cb, 16) == 0 && cb.right - cb.left > 30 * dpi;
+                if (haveCb && MacButtons.MacTitles)
+                {
+                    int capTop = Math.Max(fr.top, wr.top + cb.top), capH = Math.Max(20, cb.bottom - cb.top);
+                    if (macChecked < 3 && !MacTitle) { MacTitle = StandardCaption(fr, capTop, capH, wr.left + cb.left, dpi); macChecked++; }
+                    if (MacTitle) a = new Rectangle(fr.left + 1, capTop, fr.right - fr.left - 2, capH);
+                    else a = new Rectangle(wr.left + cb.left, capTop, cb.right - cb.left, capH);
+                }
+                else if (haveCb)
                     a = new Rectangle(wr.left + cb.left, Math.Max(fr.top, wr.top + cb.top), cb.right - cb.left, Math.Max(20, cb.bottom - cb.top));
                 else
                 {
@@ -251,7 +289,8 @@ namespace MacDock
                 }
                 area = a; drawn = true; drawnActive = activeWin;
                 IntPtr dc = N.GetDC(IntPtr.Zero);
-                uint px = GetPixel(dc, a.Left - (int)(6 * dpi), a.Top + Math.Max(1, (int)(2 * dpi)));
+                int sx = MacTitle ? a.Right - (int)(150 * dpi) : a.Left - (int)(6 * dpi);
+                uint px = GetPixel(dc, sx, a.Top + Math.Max(1, (int)(2 * dpi)));
                 N.ReleaseDC(IntPtr.Zero, dc);
                 if (px != 0xFFFFFFFF) bgColor = Color.FromArgb(255, (int)(px & 0xFF), (int)((px >> 8) & 0xFF), (int)((px >> 16) & 0xFF));
                 Render();
@@ -260,7 +299,11 @@ namespace MacDock
             catch (Exception ex) { Program.Log(ex); }
         }
 
-        PointF Origin() { return new PointF((area.Width - TrafficLights.Width(s)) / 2f, (area.Height - TrafficLights.D(s)) / 2f); }
+        PointF Origin()
+        {
+            float y = (area.Height - TrafficLights.D(s)) / 2f;
+            return MacTitle ? new PointF(12 * s, y) : new PointF((area.Width - TrafficLights.Width(s)) / 2f, y);
+        }
 
         void Render()
         {
@@ -271,7 +314,21 @@ namespace MacDock
                 {
                     g.Clear(bgColor);
                     var o = Origin();
-                    TrafficLights.Draw(g, o.X, o.Y, s, isActive, inside, bgColor.GetBrightness() > 0.55f, pressedIdx);
+                    bool lightBg = bgColor.GetBrightness() > 0.55f;
+                    TrafficLights.Draw(g, o.X, o.Y, s, isActive, inside, lightBg, pressedIdx);
+                    if (MacTitle)
+                    {
+                        // titulo centrado, en negrita suave y atenuado si la ventana no esta activa (como macOS)
+                        lastTitle = N.TitleOf(target);
+                        g.TextRenderingHint = System.Drawing.Text.TextRenderingHint.AntiAlias;
+                        Color tc = lightBg ? Color.FromArgb(isActive ? 230 : 120, 30, 30, 32) : Color.FromArgb(isActive ? 235 : 120, 236, 236, 240);
+                        float side = o.X + TrafficLights.Width(s) + 16 * s;
+                        var tr = new RectangleF(side, 0, Math.Max(10, area.Width - side * 2), area.Height);
+                        using (var f = new Font(UiFont.Semi, 13f * s, FontStyle.Regular, GraphicsUnit.Pixel))
+                        using (var b = new SolidBrush(tc))
+                        using (var sf = new StringFormat { Alignment = StringAlignment.Center, LineAlignment = StringAlignment.Center, Trimming = StringTrimming.EllipsisCharacter, FormatFlags = StringFormatFlags.NoWrap })
+                            g.DrawString(lastTitle, f, b, tr, sf);
+                    }
                 }
                 IntPtr screenDc = N.GetDC(IntPtr.Zero), memDc = N.CreateCompatibleDC(screenDc), hb = bmp.GetHbitmap(Color.FromArgb(0)), old = N.SelectObject(memDc, hb);
                 try
@@ -284,7 +341,20 @@ namespace MacDock
             }
         }
 
-        protected override void OnMouseMove(MouseEventArgs e) { base.OnMouseMove(e); if (!inside) { inside = true; Render(); hoverTimer.Start(); } }
+        bool OverDots(PointF local)
+        {
+            if (!MacTitle) return true;
+            var o = Origin();
+            return local.X >= o.X - 5 * s && local.X <= o.X + TrafficLights.Width(s) + 5 * s && local.Y >= 0 && local.Y <= area.Height;
+        }
+
+        protected override void OnMouseMove(MouseEventArgs e)
+        {
+            base.OnMouseMove(e);
+            bool over = OverDots(e.Location);
+            if (over && !inside) { inside = true; Render(); hoverTimer.Start(); }
+            else if (!over && inside && MacTitle) { inside = false; greenSince = DateTime.MaxValue; Render(); }
+        }
 
         protected override void OnMouseDown(MouseEventArgs e)
         {
@@ -292,7 +362,19 @@ namespace MacDock
             if (e.Button != MouseButtons.Left) return;
             var o = Origin();
             pressedIdx = TrafficLights.Hit(e.Location, o.X, o.Y, s);
-            if (pressedIdx >= 0) { if (Popover != null && !Popover.IsDisposed) Popover.Close(); Render(); }
+            if (pressedIdx >= 0) { if (Popover != null && !Popover.IsDisposed) Popover.Close(); Render(); return; }
+            if (!MacTitle) return;
+            if (e.Clicks >= 2)
+            {
+                // doble clic en la barra de titulo: zoom, como en macOS
+                N.PostMessage(target, 0x0112, new IntPtr(N.IsZoomed(target) ? 0xF120 : 0xF030), IntPtr.Zero);
+                return;
+            }
+            // el resto de la barra arrastra la ventana real (Windows hace el movimiento, con su contenido)
+            var sp = PointToScreen(e.Location);
+            N.SetForegroundWindow(target);
+            ReleaseCapture();
+            N.PostMessage(target, 0x00A1, new IntPtr(2), MakeLParam(sp.X, sp.Y));
         }
 
         // Ventanas visibles de la misma app (para Option+clic)
@@ -307,6 +389,12 @@ namespace MacDock
         protected override void OnMouseUp(MouseEventArgs e)
         {
             base.OnMouseUp(e);
+            if (e.Button == MouseButtons.Right && MacTitle)
+            {
+                var sp = PointToScreen(e.Location);
+                N.PostMessage(target, 0x0313, IntPtr.Zero, MakeLParam(sp.X, sp.Y));   // menu de la ventana
+                return;
+            }
             if (e.Button != MouseButtons.Left) return;
             var o = Origin();
             int i = TrafficLights.Hit(e.Location, o.X, o.Y, s), was = pressedIdx;
