@@ -671,12 +671,12 @@ namespace MacDock
             if (!Enabled || cur != null || N.IsZoomed(h) || N.IsIconic(h)) return;
             int st = N.GetWindowLong(h, -16);
             if (!own && (st & 0x00C00000) != 0x00C00000 && (st & 0x00040000) == 0) return;
-            pending = h; pendingFrame = Genie.Frame(h);
+            pending = h; pendingOwn = own; pendingFrame = Genie.Frame(h);
             if (preShot != null) { preShot.Dispose(); preShot = null; }
             if ((N.GetWindowLong(h, -20) & 0x80000) == 0) preShot = Genie.Capture(h, pendingFrame, 3000);
             if (pendingTimer != null) pendingTimer.Start();
         }
-        static Bitmap preShot;
+        static Bitmap preShot; static bool pendingOwn;
 
         public static void EndExternal(IntPtr h)
         {
@@ -693,10 +693,10 @@ namespace MacDock
             if (f.Size != pendingFrame.Size) { pending = IntPtr.Zero; pendingTimer.Stop(); return; }   // es una redimension
             if (f.Location == pendingFrame.Location) return;
             var h = pending; pending = IntPtr.Zero; pendingTimer.Stop();
-            Start(h, f);
+            Start(h, f, pendingOwn);
         }
 
-        static void Start(IntPtr h, Rectangle frame)
+        static void Start(IntPtr h, Rectangle frame, bool own)
         {
             int ex = N.GetWindowLong(h, -20);
             if ((ex & 0x80000) != 0) return;   // ya es transparente por su cuenta: no se toca
@@ -722,10 +722,19 @@ namespace MacDock
                     using (var clear = new SolidBrush(Color.Transparent)) g.FillPath(clear, outside);
                 }
             }
-            cur = new WobbleForm(h, shot, frame, Cursor.Position, ex, ov);
+            cur = new WobbleForm(h, shot, frame, Cursor.Position, ex, ov, !own);
             cur.FormClosed += (o, e) => { if (cur == o) cur = null; };
             cur.Show();
+            if (!own)
+            {
+                // MacDock toma el arrastre: Windows deja de mover (y la app de repintar) la ventana en cada pixel
+                PostMessage(h, 0x001F, IntPtr.Zero, IntPtr.Zero);   // WM_CANCELMODE
+                var t = new System.Windows.Forms.Timer { Interval = 60 };
+                t.Tick += (o, e) => { t.Stop(); t.Dispose(); if (cur != null && cur.Target == h) EdgeTiler.BeginExternal(h); };
+                t.Start();
+            }
         }
+        [System.Runtime.InteropServices.DllImport("user32.dll")] static extern bool PostMessage(IntPtr h, int msg, IntPtr w, IntPtr l);
 
         public static bool IsWobbling(IntPtr h) { return cur != null && cur.Target == h && !cur.IsDisposed; }
 
@@ -741,12 +750,16 @@ namespace MacDock
         readonly int W, H, NX = 5, NY = 5, TX = 16, TY = 12;
         readonly PointF[] pos, vel, rest; readonly float[] stiff;
         readonly PointF grab;   // punto agarrado, relativo a la ventana
-        int margin; LayeredCanvas canvas; VsyncTimer anim; Stopwatch clk = Stopwatch.StartNew(); double lastT;
-        bool released, hidden, finishing;
+        int margin; LayeredCanvas canvas; Stopwatch clk = Stopwatch.StartNew(); double lastT;
+        volatile bool released, finishing, running;
+        bool hidden;
+        readonly bool takeOver;   // arrastre de Windows tomado por MacDock: la ventana real se reubica pocas veces por segundo
+        System.Threading.Thread th; double lastMove; Point releasePos;
+        [System.Runtime.InteropServices.DllImport("dwmapi.dll")] static extern int DwmFlush();
 
-        public WobbleForm(IntPtr target, Bitmap img, Rectangle frame, Point cursor, int exStyle, ButtonOverlay overlay)
+        public WobbleForm(IntPtr target, Bitmap img, Rectangle frame, Point cursor, int exStyle, ButtonOverlay overlay, bool takeOver)
         {
-            Target = target; this.img = img; this.exStyle = exStyle; this.overlay = overlay;
+            Target = target; this.img = img; this.exStyle = exStyle; this.overlay = overlay; this.takeOver = takeOver;
             W = frame.Width; H = frame.Height;
             margin = (int)Math.Min(380, Math.Max(120, Math.Max(W, H) * 0.3f));
             grab = new PointF(Math.Max(0, Math.Min(W, cursor.X - frame.Left)), Math.Max(0, Math.Min(H, cursor.Y - frame.Top)));
@@ -764,7 +777,6 @@ namespace MacDock
                 }
             FormBorderStyle = FormBorderStyle.None; ShowInTaskbar = false; StartPosition = FormStartPosition.Manual;
             Bounds = new Rectangle(frame.Left - margin, frame.Top - margin, W + margin * 2, H + margin * 2);
-            anim = new VsyncTimer(this); anim.Tick += (o, e) => Frame();
         }
 
         protected override CreateParams CreateParams { get { var cp = base.CreateParams; cp.ExStyle |= 0x80000 | 0x20 | 0x80 | 0x8000000 | 0x8; return cp; } }
@@ -780,25 +792,53 @@ namespace MacDock
             Wobbly.HideReal(Target, exStyle); hidden = true;
             if (overlay != null && !overlay.IsDisposed) overlay.Hide2();
             lastT = clk.Elapsed.TotalSeconds;
-            anim.Start();
+            // hilo de dibujo propio, al ritmo de la pantalla: no depende del hilo principal de MacDock
+            running = true;
+            th = new System.Threading.Thread(() =>
+            {
+                while (running)
+                {
+                    long t0 = clk.ElapsedTicks;
+                    if (DwmFlush() != 0 || (clk.ElapsedTicks - t0) * 1000.0 / Stopwatch.Frequency < 1.0) System.Threading.Thread.Sleep(4);
+                    if (!running) break;
+                    try { Frame(); }
+                    catch (Exception ex) { Program.Log(ex); running = false; EndOnUi(true); }
+                }
+            }) { IsBackground = true, Name = "MacDockWobble", Priority = System.Threading.ThreadPriority.AboveNormal };
+            th.Start();
         }
 
-        public void Release() { released = true; }
+        // el fin de la gelatina se hace en el hilo principal
+        void EndOnUi(bool now) { try { BeginInvoke(new Action(() => Finish(now))); } catch { } }
+
+        public void Release() { if (!takeOver) released = true; }   // con el arrastre tomado, el soltar lo detecta MacDock
 
         void Frame()
         {
             if (finishing) return;
             double now = clk.Elapsed.TotalSeconds; float dt = (float)Math.Min(0.034, now - lastT); lastT = now;
-            if (!N.IsWindowVisible(Target) || N.IsIconic(Target)) { Finish(true); return; }
+            if (!N.IsWindowVisible(Target) || N.IsIconic(Target)) { running = false; EndOnUi(true); return; }
             var real = Genie.Frame(Target);
-            if (real.Width != W || real.Height != H) { Finish(true); return; }   // se redimensiono o se acomodo: fuera la gelatina
+            if (real.Width != W || real.Height != H) { running = false; EndOnUi(true); return; }   // se redimensiono o se acomodo
+            var cpos = Cursor.Position;
             if (!released)
             {
                 int vk = SystemInformation.MouseButtonsSwapped ? 0x02 : 0x01;
-                if ((GetAsyncKeyState(vk) & 0x8000) == 0) released = true;
+                if ((GetAsyncKeyState(vk) & 0x8000) == 0)
+                {
+                    released = true;
+                    if (takeOver)
+                    {
+                        // al soltar, la ventana real queda exactamente donde la dejaste, y se revisan los bordes (acomodo)
+                        releasePos = new Point((int)(cpos.X - grab.X), (int)(cpos.Y - grab.Y));
+                        MoveReal(releasePos, false);
+                        var h0 = Target; try { BeginInvoke(new Action(() => EdgeTiler.EndExternal(h0))); } catch { }
+                    }
+                }
+                else if (takeOver && now - lastMove > 0.08) { lastMove = now; MoveReal(new Point((int)(cpos.X - grab.X), (int)(cpos.Y - grab.Y)), true); }
             }
-            var cpos = Cursor.Position;
-            var f = released ? real : new Rectangle((int)(cpos.X - grab.X), (int)(cpos.Y - grab.Y), W, H);
+            var f = !released ? new Rectangle((int)(cpos.X - grab.X), (int)(cpos.Y - grab.Y), W, H)
+                  : takeOver ? new Rectangle(releasePos, new Size(W, H)) : real;
             // fisica: cada nodo es atraido a su lugar en la ventana real con un resorte poco amortiguado
             int steps = Math.Max(1, (int)Math.Ceiling(dt / 0.004f)); float h = dt / steps;
             float maxOff = 0, maxV = 0;
@@ -819,7 +859,17 @@ namespace MacDock
                 maxOff = Math.Max(maxOff, Math.Max(ox, oy)); maxV = Math.Max(maxV, Math.Max(Math.Abs(vel[id].X), Math.Abs(vel[id].Y)));
             }
             Draw(f.Location);
-            if (released && maxOff < 0.6f && maxV < 12f) Finish(false);
+            if (released && maxOff < 0.6f && maxV < 12f) { running = false; EndOnUi(false); }
+        }
+
+        // reubica la ventana real (invisible) sin esperar a la app
+        void MoveReal(Point topLeftOfFrame, bool async)
+        {
+            N.RECT wr; N.GetWindowRect(Target, out wr);
+            var fr = Genie.Frame(Target);
+            int dx = topLeftOfFrame.X - fr.Left, dy = topLeftOfFrame.Y - fr.Top;
+            if (dx == 0 && dy == 0) return;
+            N.SetWindowPos(Target, IntPtr.Zero, wr.left + dx, wr.top + dy, 0, 0, 0x0001 | 0x0004 | 0x0010 | 0x0200 | (async ? 0x4000 : 0));
         }
 
         // posicion de un punto de la ventana (u,v en 0..1) interpolando la malla
@@ -920,7 +970,8 @@ namespace MacDock
         public void Finish(bool now)
         {
             if (finishing) return;
-            finishing = true; anim.Stop();
+            finishing = true; running = false;
+            if (th != null && th != System.Threading.Thread.CurrentThread) th.Join(200);
             if (hidden) { Wobbly.ShowReal(Target, exStyle); hidden = false; }
             var mb = MacButtons.Instance;
             if (overlay != null && !overlay.IsDisposed && mb != null) overlay.Place(mb.IsActive(Target));
@@ -932,7 +983,7 @@ namespace MacDock
 
         protected override void Dispose(bool disposing)
         {
-            if (disposing) { anim.Close(); if (hidden) Wobbly.ShowReal(Target, exStyle); if (canvas != null) { canvas.Dispose(); canvas = null; } img.Dispose(); }
+            if (disposing) { running = false; if (th != null) th.Join(200); if (hidden) Wobbly.ShowReal(Target, exStyle); if (canvas != null) { canvas.Dispose(); canvas = null; } img.Dispose(); }
             base.Dispose(disposing);
         }
     }
