@@ -63,8 +63,13 @@ namespace MacDock
         Timer cleanup = new Timer { Interval = 2000 };
         public static readonly uint MyPid = (uint)System.Diagnostics.Process.GetCurrentProcess().Id;
 
+        public static MacButtons Instance;
+        public ButtonOverlay OverlayFor(IntPtr h) { ButtonOverlay o; return overlays.TryGetValue(h, out o) && !o.IsDisposed ? o : null; }
+        public bool IsActive(IntPtr h) { return h == active; }
+
         public MacButtons(bool lightTheme)
         {
+            Instance = this;
             FormBorderStyle = FormBorderStyle.None; ShowInTaskbar = false; StartPosition = FormStartPosition.Manual;
             Bounds = new Rectangle(-200, -200, 1, 1);
             cleanup.Tick += (o, e) => Cleanup();
@@ -279,7 +284,7 @@ namespace MacDock
             try
             {
                 IntPtr h = target;
-                if (N.IsIconic(h)) { Hide2(); return; }
+                if (N.IsIconic(h) || Wobbly.IsWobbling(h)) { Hide2(); return; }
                 string why = MacButtons.WhyNot(h);
                 if (why != null) { MacButtons.Diag(h, "oculto: " + why); Hide2(); return; }
                 isActive = activeWin;
@@ -340,9 +345,36 @@ namespace MacDock
             if (area.Width <= 0 || IsDisposed) return;
             using (var bmp = new Bitmap(area.Width, area.Height, PixelFormat.Format32bppArgb))
             {
-                using (var g = Graphics.FromImage(bmp))
+                using (var g = Graphics.FromImage(bmp)) DrawContent(g);
+                IntPtr screenDc = N.GetDC(IntPtr.Zero), memDc = N.CreateCompatibleDC(screenDc), hb = bmp.GetHbitmap(Color.FromArgb(0)), old = N.SelectObject(memDc, hb);
+                try
                 {
-                    g.Clear(bgColor);
+                    var size = new N.SIZE { cx = area.Width, cy = area.Height }; var src = new N.POINT(); var dst = new N.POINT { x = area.Left, y = area.Top };
+                    var bl = new N.BLENDFUNCTION { BlendOp = 0, SourceConstantAlpha = 255, AlphaFormat = 1 };
+                    N.UpdateLayeredWindow(Handle, screenDc, ref dst, ref size, memDc, ref src, 0, ref bl, 2);
+                }
+                finally { N.ReleaseDC(IntPtr.Zero, screenDc); N.SelectObject(memDc, old); N.DeleteObject(hb); N.DeleteDC(memDc); }
+            }
+        }
+
+        public Rectangle Area { get { return area; } }
+        public bool Shown { get { return IsHandleCreated && !IsDisposed && N.IsWindowVisible(Handle); } }
+
+        // pinta la capa (fondo, puntos y titulo) en otro lienzo: lo usa la ondulacion para que no aparezcan los botones de Windows
+        public void PaintInto(Graphics g, float ox, float oy, float k)
+        {
+            var st = g.Save();
+            g.TranslateTransform(ox, oy); g.ScaleTransform(k, k);
+            g.SetClip(new RectangleF(0, 0, area.Width, area.Height));
+            DrawContent(g);
+            g.Restore(st);
+        }
+
+        void DrawContent(Graphics g)
+        {
+            {
+                {
+                    using (var bb = new SolidBrush(bgColor)) g.FillRectangle(bb, 0, 0, area.Width, area.Height);
                     var o = Origin();
                     bool lightBg = bgColor.GetBrightness() > 0.55f;
                     TrafficLights.Draw(g, o.X, o.Y, s, isActive, inside, lightBg, pressedIdx);
@@ -360,14 +392,6 @@ namespace MacDock
                             g.DrawString(lastTitle, f, b, tr, sf);
                     }
                 }
-                IntPtr screenDc = N.GetDC(IntPtr.Zero), memDc = N.CreateCompatibleDC(screenDc), hb = bmp.GetHbitmap(Color.FromArgb(0)), old = N.SelectObject(memDc, hb);
-                try
-                {
-                    var size = new N.SIZE { cx = area.Width, cy = area.Height }; var src = new N.POINT(); var dst = new N.POINT { x = area.Left, y = area.Top };
-                    var bl = new N.BLENDFUNCTION { BlendOp = 0, SourceConstantAlpha = 255, AlphaFormat = 1 };
-                    N.UpdateLayeredWindow(Handle, screenDc, ref dst, ref size, memDc, ref src, 0, ref bl, 2);
-                }
-                finally { N.ReleaseDC(IntPtr.Zero, screenDc); N.SelectObject(memDc, old); N.DeleteObject(hb); N.DeleteDC(memDc); }
             }
         }
 

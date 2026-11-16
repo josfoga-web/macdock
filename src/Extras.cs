@@ -136,6 +136,7 @@ namespace MacDock
                 N.GetWindowRect(h, out r);
             }
             EdgeTiler.BeginExternal(h);   // recupera el tamano si estaba acomodada y muestra las zonas al llegar a un borde
+            Wobbly.BeginExternal(h);
             N.GetWindowRect(h, out r);
             grab = new Point(c.X - r.left, c.Y - r.top);
             if (comp != IntPtr.Zero) { N.RECT cr; N.GetWindowRect(comp, out cr); compOff = new Point(cr.left - r.left, cr.top - r.top); }
@@ -147,7 +148,7 @@ namespace MacDock
         static void Tick()
         {
             int vk = GetSystemMetrics(23) != 0 ? 0x02 : 0x01;   // botones invertidos para zurdos
-            if ((GetAsyncKeyState(vk) & 0x8000) == 0) { var h = win; Stop(); EdgeTiler.EndExternal(h); return; }
+            if ((GetAsyncKeyState(vk) & 0x8000) == 0) { var h = win; Stop(); Wobbly.EndExternal(h); EdgeTiler.EndExternal(h); return; }
             var c = Cursor.Position;
             int x = c.X - grab.X, y = Math.Max(Screen.FromPoint(c).WorkingArea.Top - grab.Y + 4, c.Y - grab.Y);
             N.SetWindowPos(win, IntPtr.Zero, x, y, 0, 0, 0x0001 | 0x0004 | 0x0010 | 0x0200);
@@ -178,14 +179,14 @@ namespace MacDock
         static readonly Dictionary<IntPtr, KeyValuePair<Bitmap, Rectangle>> shots = new Dictionary<IntPtr, KeyValuePair<Bitmap, Rectangle>>();
         static int animOff;   // minimizaciones en curso con la animacion de Windows apagada
 
-        static Rectangle Frame(IntPtr h)
+        internal static Rectangle Frame(IntPtr h)
         {
             N.RECT r;
             if (DwmGetWindowAttribute(h, 9, out r, 16) != 0) N.GetWindowRect(h, out r);
             return Rectangle.FromLTRB(r.left, r.top, r.right, r.bottom);
         }
 
-        static Bitmap Capture(IntPtr h, Rectangle frame)
+        internal static Bitmap Capture(IntPtr h, Rectangle frame)
         {
             N.RECT wr; N.GetWindowRect(h, out wr);
             int w = wr.right - wr.left, hh = wr.bottom - wr.top;
@@ -605,6 +606,259 @@ namespace MacDock
                 }
                 foreach (var p in pngs) w.Write(p);
             }
+        }
+    }
+}
+
+namespace MacDock
+{
+    // Ventanas "gelatina" al moverlas (como los wobbly windows de KDE/Compiz): mientras se mueve la ventana se muestra
+    // una captura sobre una malla de resortes; el punto agarrado sigue al puntero y el resto se retrasa y rebota.
+    // La ventana real se mueve igual (invisible) y reaparece al asentarse. Funciona con cualquier forma de arrastrar.
+    static class Wobbly
+    {
+        delegate void WinEventProc(IntPtr hook, uint ev, IntPtr hwnd, int obj, int child, uint thread, uint time);
+        [System.Runtime.InteropServices.DllImport("user32.dll")] static extern IntPtr SetWinEventHook(uint min, uint max, IntPtr mod, WinEventProc proc, uint pid, uint tid, uint flags);
+        [System.Runtime.InteropServices.DllImport("user32.dll")] static extern bool UnhookWinEvent(IntPtr h);
+        [System.Runtime.InteropServices.DllImport("user32.dll")] static extern int SetWindowLong(IntPtr h, int idx, int v);
+        [System.Runtime.InteropServices.DllImport("user32.dll")] static extern bool SetLayeredWindowAttributes(IntPtr h, uint key, byte alpha, uint flags);
+        [System.Runtime.InteropServices.DllImport("user32.dll")] static extern bool RedrawWindow(IntPtr h, IntPtr rc, IntPtr rgn, uint flags);
+        [System.Runtime.InteropServices.DllImport("user32.dll")] static extern short GetAsyncKeyState(int vk);
+
+        public static bool Enabled = true;
+        static WinEventProc proc; static IntPtr hook;
+        static IntPtr pending; static Rectangle pendingFrame;   // movimiento iniciado, la gelatina arranca con el primer desplazamiento
+        static System.Windows.Forms.Timer pendingTimer;
+        static WobbleForm cur;
+
+        public static void Install()
+        {
+            if (hook != IntPtr.Zero) return;
+            proc = OnEvent;
+            hook = SetWinEventHook(0x000A, 0x000B, IntPtr.Zero, proc, 0, 0, 0x0002);
+            pendingTimer = new System.Windows.Forms.Timer { Interval = 8 };
+            pendingTimer.Tick += (o, e) => CheckPending();
+        }
+
+        public static void Uninstall()
+        {
+            if (hook != IntPtr.Zero) { UnhookWinEvent(hook); hook = IntPtr.Zero; }
+            if (cur != null) cur.Finish(true);
+        }
+
+        static void OnEvent(IntPtr hk, uint ev, IntPtr h, int obj, int child, uint thread, uint time)
+        {
+            if (obj != 0 || h == IntPtr.Zero) return;
+            if (ev == 0x000A) BeginExternal(h); else EndExternal(h);
+        }
+
+        public static void BeginExternal(IntPtr h)
+        {
+            if (!Enabled || cur != null || N.IsZoomed(h) || N.IsIconic(h)) return;
+            int st = N.GetWindowLong(h, -16);
+            if ((st & 0x00C00000) != 0x00C00000 && (st & 0x00040000) == 0) return;
+            pending = h; pendingFrame = Genie.Frame(h);
+            if (pendingTimer != null) pendingTimer.Start();
+        }
+
+        public static void EndExternal(IntPtr h)
+        {
+            if (h == pending) { pending = IntPtr.Zero; pendingTimer.Stop(); }
+            if (cur != null && cur.Target == h) cur.Release();
+        }
+
+        static void CheckPending()
+        {
+            if (pending == IntPtr.Zero) { pendingTimer.Stop(); return; }
+            int vk = SystemInformation.MouseButtonsSwapped ? 0x02 : 0x01;
+            if ((GetAsyncKeyState(vk) & 0x8000) == 0) { pending = IntPtr.Zero; pendingTimer.Stop(); return; }
+            var f = Genie.Frame(pending);
+            if (f.Size != pendingFrame.Size) { pending = IntPtr.Zero; pendingTimer.Stop(); return; }   // es una redimension
+            if (f.Location == pendingFrame.Location) return;
+            var h = pending; pending = IntPtr.Zero; pendingTimer.Stop();
+            Start(h, f);
+        }
+
+        static void Start(IntPtr h, Rectangle frame)
+        {
+            int ex = N.GetWindowLong(h, -20);
+            if ((ex & 0x80000) != 0) return;   // ya es transparente por su cuenta: no se toca
+            var shot = Genie.Capture(h, frame);
+            if (shot == null) return;
+            float k = shot.Width / (float)frame.Width;
+            // la barra estilo Mac de MacDock se pinta en la captura (si no, se verian los botones de Windows)
+            var mb = MacButtons.Instance; ButtonOverlay ov = mb != null ? mb.OverlayFor(h) : null;
+            using (var g = Graphics.FromImage(shot))
+            {
+                if (ov != null && ov.Shown) ov.PaintInto(g, (ov.Area.Left - frame.Left) * k, (ov.Area.Top - frame.Top) * k, k);
+                // esquinas redondeadas de Windows 11
+                float rad = 8f * k * (N.GetDpiForWindow(h) / 96f);
+                using (var outside = new System.Drawing.Drawing2D.GraphicsPath())
+                {
+                    outside.AddRectangle(new RectangleF(0, 0, shot.Width, shot.Height));
+                    var r = new RectangleF(0, 0, shot.Width, shot.Height); float d = rad * 2;
+                    outside.AddArc(r.X, r.Y, d, d, 180, 90); outside.AddArc(r.Right - d, r.Y, d, d, 270, 90);
+                    outside.AddArc(r.Right - d, r.Bottom - d, d, d, 0, 90); outside.AddArc(r.X, r.Bottom - d, d, d, 90, 90);
+                    outside.CloseFigure(); outside.FillMode = System.Drawing.Drawing2D.FillMode.Alternate;
+                    g.CompositingMode = System.Drawing.Drawing2D.CompositingMode.SourceCopy;
+                    using (var clear = new SolidBrush(Color.Transparent)) g.FillPath(clear, outside);
+                }
+            }
+            cur = new WobbleForm(h, shot, frame, Cursor.Position, ex, ov);
+            cur.FormClosed += (o, e) => { if (cur == o) cur = null; };
+            cur.Show();
+        }
+
+        public static bool IsWobbling(IntPtr h) { return cur != null && cur.Target == h && !cur.IsDisposed; }
+
+        internal static void HideReal(IntPtr h, int ex) { SetWindowLong(h, -20, ex | 0x80000); SetLayeredWindowAttributes(h, 0, 0, 2); }
+        internal static void ShowReal(IntPtr h, int ex) { SetWindowLong(h, -20, ex); RedrawWindow(h, IntPtr.Zero, IntPtr.Zero, 0x0001 | 0x0004 | 0x0080 | 0x0400); }
+    }
+
+    class WobbleForm : Form
+    {
+        [System.Runtime.InteropServices.DllImport("user32.dll")] static extern short GetAsyncKeyState(int vk);
+        public readonly IntPtr Target;
+        readonly Bitmap img; readonly int exStyle; readonly ButtonOverlay overlay;
+        readonly int W, H, NX = 5, NY = 5, TX = 16, TY = 12;
+        readonly PointF[] pos, vel, rest; readonly float[] stiff;
+        readonly PointF grab;   // punto agarrado, relativo a la ventana
+        int margin; LayeredCanvas canvas; VsyncTimer anim; Stopwatch clk = Stopwatch.StartNew(); double lastT;
+        bool released, hidden, finishing;
+
+        public WobbleForm(IntPtr target, Bitmap img, Rectangle frame, Point cursor, int exStyle, ButtonOverlay overlay)
+        {
+            Target = target; this.img = img; this.exStyle = exStyle; this.overlay = overlay;
+            W = frame.Width; H = frame.Height;
+            margin = (int)Math.Min(260, Math.Max(90, Math.Max(W, H) * 0.22f));
+            grab = new PointF(Math.Max(0, Math.Min(W, cursor.X - frame.Left)), Math.Max(0, Math.Min(H, cursor.Y - frame.Top)));
+            int n = NX * NY; pos = new PointF[n]; vel = new PointF[n]; rest = new PointF[n]; stiff = new float[n];
+            float diag = (float)Math.Sqrt(W * W + H * H);
+            for (int j = 0; j < NY; j++)
+                for (int i = 0; i < NX; i++)
+                {
+                    int id = j * NX + i;
+                    rest[id] = new PointF(i * W / (float)(NX - 1), j * H / (float)(NY - 1));
+                    pos[id] = new PointF(frame.Left + rest[id].X, frame.Top + rest[id].Y);
+                    float d = (float)Math.Sqrt((rest[id].X - grab.X) * (rest[id].X - grab.X) + (rest[id].Y - grab.Y) * (rest[id].Y - grab.Y)) / diag;
+                    float f = 1 - Math.Min(1, d * 1.4f);
+                    stiff[id] = 300f + 1500f * f * f;   // cerca del agarre: rigido; lejos: blando (rebota)
+                }
+            FormBorderStyle = FormBorderStyle.None; ShowInTaskbar = false; StartPosition = FormStartPosition.Manual;
+            Bounds = new Rectangle(frame.Left - margin, frame.Top - margin, W + margin * 2, H + margin * 2);
+            anim = new VsyncTimer(this); anim.Tick += (o, e) => Frame();
+        }
+
+        protected override CreateParams CreateParams { get { var cp = base.CreateParams; cp.ExStyle |= 0x80000 | 0x20 | 0x80 | 0x8000000 | 0x8; return cp; } }
+        protected override bool ShowWithoutActivation { get { return true; } }
+
+        protected override void OnShown(EventArgs e)
+        {
+            base.OnShown(e);
+            canvas = new LayeredCanvas(W + margin * 2, H + margin * 2);
+            var f = Genie.Frame(Target);
+            Draw(f.Location);
+            // la captura ya cubre la ventana: ahora se oculta la real (y su barra Mac)
+            Wobbly.HideReal(Target, exStyle); hidden = true;
+            if (overlay != null && !overlay.IsDisposed) overlay.Hide2();
+            lastT = clk.Elapsed.TotalSeconds;
+            anim.Start();
+        }
+
+        public void Release() { released = true; }
+
+        void Frame()
+        {
+            if (finishing) return;
+            double now = clk.Elapsed.TotalSeconds; float dt = (float)Math.Min(0.034, now - lastT); lastT = now;
+            if (!N.IsWindowVisible(Target) || N.IsIconic(Target)) { Finish(true); return; }
+            var f = Genie.Frame(Target);
+            if (f.Width != W || f.Height != H) { Finish(true); return; }   // se redimensiono o se acomodo: fuera la gelatina
+            if (!released)
+            {
+                int vk = SystemInformation.MouseButtonsSwapped ? 0x02 : 0x01;
+                if ((GetAsyncKeyState(vk) & 0x8000) == 0) released = true;
+            }
+            // fisica: cada nodo es atraido a su lugar en la ventana real con un resorte poco amortiguado
+            int steps = Math.Max(1, (int)Math.Ceiling(dt / 0.004f)); float h = dt / steps;
+            float maxOff = 0, maxV = 0;
+            for (int s = 0; s < steps; s++)
+                for (int id = 0; id < pos.Length; id++)
+                {
+                    float tx = f.Left + rest[id].X, ty = f.Top + rest[id].Y, k = stiff[id], c = 2f * (float)Math.Sqrt(k) * 0.5f;
+                    float ax = k * (tx - pos[id].X) - c * vel[id].X, ay = k * (ty - pos[id].Y) - c * vel[id].Y;
+                    vel[id] = new PointF(vel[id].X + ax * h, vel[id].Y + ay * h);
+                    float px = pos[id].X + vel[id].X * h, py = pos[id].Y + vel[id].Y * h;
+                    // sin salirse del lienzo
+                    px = Math.Max(tx - margin + 2, Math.Min(tx + margin - 2, px)); py = Math.Max(ty - margin + 2, Math.Min(ty + margin - 2, py));
+                    pos[id] = new PointF(px, py);
+                }
+            for (int id = 0; id < pos.Length; id++)
+            {
+                float ox = Math.Abs(pos[id].X - (f.Left + rest[id].X)), oy = Math.Abs(pos[id].Y - (f.Top + rest[id].Y));
+                maxOff = Math.Max(maxOff, Math.Max(ox, oy)); maxV = Math.Max(maxV, Math.Max(Math.Abs(vel[id].X), Math.Abs(vel[id].Y)));
+            }
+            Draw(f.Location);
+            if (released && maxOff < 0.6f && maxV < 12f) Finish(false);
+        }
+
+        // posicion de un punto de la ventana (u,v en 0..1) interpolando la malla
+        PointF At(float u, float v)
+        {
+            float gx = u * (NX - 1), gy = v * (NY - 1);
+            int i = Math.Min(NX - 2, (int)gx), j = Math.Min(NY - 2, (int)gy);
+            float fx = gx - i, fy = gy - j;
+            PointF a = pos[j * NX + i], b = pos[j * NX + i + 1], c = pos[(j + 1) * NX + i], d = pos[(j + 1) * NX + i + 1];
+            float top = a.X + (b.X - a.X) * fx, bot = c.X + (d.X - c.X) * fx;
+            float topY = a.Y + (b.Y - a.Y) * fx, botY = c.Y + (d.Y - c.Y) * fx;
+            return new PointF(top + (bot - top) * fy, topY + (botY - topY) * fy);
+        }
+
+        void Draw(Point origin)
+        {
+            int cx = origin.X - margin, cy = origin.Y - margin;
+            using (var g = Graphics.FromImage(canvas.Bitmap))
+            {
+                g.Clear(Color.Transparent);
+                g.InterpolationMode = System.Drawing.Drawing2D.InterpolationMode.Bilinear;
+                g.PixelOffsetMode = System.Drawing.Drawing2D.PixelOffsetMode.Half;
+                g.CompositingQuality = System.Drawing.Drawing2D.CompositingQuality.HighSpeed;
+                float sw = img.Width / (float)TX, sh = img.Height / (float)TY;
+                for (int j = 0; j < TY; j++)
+                    for (int i = 0; i < TX; i++)
+                    {
+                        float u0 = i / (float)TX, v0 = j / (float)TY, u1 = (i + 1) / (float)TX, v1 = (j + 1) / (float)TY;
+                        PointF p00 = At(u0, v0), p10 = At(u1, v0), p01 = At(u0, v1);
+                        // se agranda cada pieza medio pixel para que no queden rendijas entre ellas
+                        float ex = 0.7f;
+                        var dx = new PointF(p10.X - p00.X, p10.Y - p00.Y); var dy = new PointF(p01.X - p00.X, p01.Y - p00.Y);
+                        float lx = Math.Max(1f, (float)Math.Sqrt(dx.X * dx.X + dx.Y * dx.Y)), ly = Math.Max(1f, (float)Math.Sqrt(dy.X * dy.X + dy.Y * dy.Y));
+                        var q00 = new PointF(p00.X - cx, p00.Y - cy);
+                        var q10 = new PointF(q00.X + dx.X * (1 + ex / lx), q00.Y + dx.Y * (1 + ex / lx));
+                        var q01 = new PointF(q00.X + dy.X * (1 + ex / ly), q00.Y + dy.Y * (1 + ex / ly));
+                        g.DrawImage(img, new[] { q00, q10, q01 }, new RectangleF(i * sw, j * sh, sw, sh), GraphicsUnit.Pixel);
+                    }
+            }
+            canvas.Push(Handle, cx, cy);
+        }
+
+        public void Finish(bool now)
+        {
+            if (finishing) return;
+            finishing = true; anim.Stop();
+            if (hidden) { Wobbly.ShowReal(Target, exStyle); hidden = false; }
+            var mb = MacButtons.Instance;
+            if (overlay != null && !overlay.IsDisposed && mb != null) overlay.Place(mb.IsActive(Target));
+            // se espera un refresco para que la ventana real ya este pintada antes de quitar la captura
+            var t = new System.Windows.Forms.Timer { Interval = now ? 1 : 30 };
+            t.Tick += (o, e) => { t.Stop(); t.Dispose(); Close(); };
+            t.Start();
+        }
+
+        protected override void Dispose(bool disposing)
+        {
+            if (disposing) { anim.Close(); if (hidden) Wobbly.ShowReal(Target, exStyle); if (canvas != null) { canvas.Dispose(); canvas = null; } img.Dispose(); }
+            base.Dispose(disposing);
         }
     }
 }
