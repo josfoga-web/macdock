@@ -445,21 +445,32 @@ namespace MacDock
             {
                 g.Clear(Color.Transparent);
                 g.InterpolationMode = InterpolationMode.Bilinear;
-                g.PixelOffsetMode = PixelOffsetMode.Half;
+                g.PixelOffsetMode = PixelOffsetMode.None;
                 g.CompositingQuality = CompositingQuality.HighSpeed;
                 float ih = img.Height / (float)strips;
-                for (int i = 0; i < strips; i++)
+                int prevBottom = int.MinValue;
+                using (var clamp = new System.Drawing.Imaging.ImageAttributes())
                 {
-                    float v0 = i / (float)strips, v1 = (i + 1) / (float)strips;
-                    // si el dock estuviera arriba, lidera la parte superior
-                    float lead0 = down ? 1 - v0 : v0, lead1 = down ? 1 - v1 : v1;
-                    float q0 = Smooth(t * (1 + lag) - lead0 * lag), q1 = Smooth(t * (1 + lag) - lead1 * lag);
-                    float y0 = (sy + v0 * sh) + ((ty + v0 * th) - (sy + v0 * sh)) * q0;
-                    float y1 = (sy + v1 * sh) + ((ty + v1 * th) - (sy + v1 * sh)) * q1;
-                    float k = Smooth((q0 + q1) / 2 * 1.35f);
-                    float l = sx + (tx - sx) * k, r = sx + sw + (tx + tw - sx - sw) * k;
-                    if (y1 - y0 < 0.25f || r - l < 0.5f) continue;
-                    g.DrawImage(img, new RectangleF(l, y0, r - l, y1 - y0 + 0.6f), new RectangleF(0, i * ih, img.Width, ih), GraphicsUnit.Pixel);
+                    clamp.SetWrapMode(System.Drawing.Drawing2D.WrapMode.TileFlipXY);
+                    for (int i = 0; i < strips; i++)
+                    {
+                        float v0 = i / (float)strips, v1 = (i + 1) / (float)strips;
+                        // si el dock estuviera arriba, lidera la parte superior
+                        float lead0 = down ? 1 - v0 : v0, lead1 = down ? 1 - v1 : v1;
+                        float q0 = Smooth(t * (1 + lag) - lead0 * lag), q1 = Smooth(t * (1 + lag) - lead1 * lag);
+                        float y0 = (sy + v0 * sh) + ((ty + v0 * th) - (sy + v0 * sh)) * q0;
+                        float y1 = (sy + v1 * sh) + ((ty + v1 * th) - (sy + v1 * sh)) * q1;
+                        float k = Smooth((q0 + q1) / 2 * 1.35f);
+                        float l = sx + (tx - sx) * k, r = sx + sw + (tx + tw - sx - sw) * k;
+                        // franjas contiguas en pixeles enteros: nunca queda una rendija
+                        int top = prevBottom == int.MinValue ? (int)Math.Round(y0) : prevBottom;
+                        int bottom = (int)Math.Round(y1);
+                        if (bottom <= top) continue;   // franja comprimida a menos de un pixel: la siguiente la cubre
+                        prevBottom = bottom;
+                        int xl = (int)Math.Round(l), xr = (int)Math.Round(r);
+                        if (xr <= xl) continue;
+                        g.DrawImage(img, new Rectangle(xl, top, xr - xl, bottom - top), 0, i * ih, img.Width, ih, GraphicsUnit.Pixel, clamp);
+                    }
                 }
             }
             canvas.Push(Handle, box.Left, box.Top);
@@ -820,6 +831,8 @@ namespace MacDock
         }
 
         Rectangle prevBox = Rectangle.Empty;
+        readonly System.Drawing.Imaging.ImageAttributes edgeClamp = MakeClamp();
+        static System.Drawing.Imaging.ImageAttributes MakeClamp() { var a = new System.Drawing.Imaging.ImageAttributes(); a.SetWrapMode(System.Drawing.Drawing2D.WrapMode.TileFlipXY); return a; }
 
         // Rapido: la ventana se dibuja en filas finas, cada una desplazada y estirada segun la malla (copia casi 1:1),
         // y solo se limpia y se envia a la pantalla el rectangulo que ocupa
@@ -835,18 +848,26 @@ namespace MacDock
                 g.CompositingMode = System.Drawing.Drawing2D.CompositingMode.SourceCopy;
                 var dirty = prevBox.IsEmpty ? box : Rectangle.Union(prevBox, box);
                 using (var clear = new SolidBrush(Color.Transparent)) g.FillRectangle(clear, dirty);
+                // las filas se pintan encima (no reemplazan): un borde de una fila nunca abre un hueco en la de al lado
+                g.CompositingMode = System.Drawing.Drawing2D.CompositingMode.SourceOver;
                 g.InterpolationMode = System.Drawing.Drawing2D.InterpolationMode.NearestNeighbor;
-                g.PixelOffsetMode = System.Drawing.Drawing2D.PixelOffsetMode.Half;
+                g.PixelOffsetMode = System.Drawing.Drawing2D.PixelOffsetMode.None;
                 g.CompositingQuality = System.Drawing.Drawing2D.CompositingQuality.HighSpeed;
                 float k = img.Height / (float)H;
                 const int Row = 3;
+                // Sin rendijas: cada fila se coloca en pixeles enteros y empieza exactamente donde termino la anterior,
+                // y el borde de la imagen se repite en vez de mezclarse con transparente
+                int prevBottom = int.MinValue;
                 for (int y = 0; y < H; y += Row)
                 {
                     int rh = Math.Min(Row, H - y);
                     float v0 = y / (float)H, v1 = (y + rh) / (float)H, vm = (v0 + v1) / 2;
                     PointF l = At(0, vm), r = At(1, vm);
-                    float y0 = (At(0, v0).Y + At(1, v0).Y) / 2 - cy, y1 = (At(0, v1).Y + At(1, v1).Y) / 2 - cy;
-                    g.DrawImage(img, new RectangleF(l.X - cx, y0, r.X - l.X, Math.Max(1f, y1 - y0) + 0.75f), new RectangleF(0, y * k, img.Width, rh * k), GraphicsUnit.Pixel);
+                    int top = prevBottom == int.MinValue ? (int)Math.Round((At(0, v0).Y + At(1, v0).Y) / 2 - cy) : prevBottom;
+                    int bottom = Math.Max(top + 1, (int)Math.Round((At(0, v1).Y + At(1, v1).Y) / 2 - cy));
+                    prevBottom = bottom;
+                    int xl = (int)Math.Round(l.X - cx), xr = Math.Max(xl + 1, (int)Math.Round(r.X - cx));
+                    g.DrawImage(img, new Rectangle(xl, top, xr - xl, bottom - top), 0, y * k, img.Width, rh * k, GraphicsUnit.Pixel, edgeClamp);
                 }
             }
             prevBox = box;

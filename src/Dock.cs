@@ -94,7 +94,7 @@ namespace MacDock
         public bool UseFinder = true;
         public bool SpotlightKey = true;
         public bool QuickLookExplorer = true;
-        public bool MacButtons = true;
+        public bool MacButtons = false;
         public bool DesktopMenu = true;
         public bool WindowPreviews = true;
         public bool MultiMonitor = true;
@@ -114,7 +114,7 @@ namespace MacDock
         public bool GenieFx = true;
         public bool Wobbly = true;
         public int ConfigVer = 0;
-        public bool MacTitles = true;
+        public bool MacTitles = false;
         string path;
 
         public Config(string p)
@@ -974,7 +974,8 @@ namespace MacDock
             orderFile = Path.Combine(Program.DataDir, "order.txt");
             cfg = new Config(Path.Combine(Program.DataDir, "config.ini"));
             // al actualizar: los botones de Mac y la barra estilo Mac quedan activados aunque una version anterior los apagara
-            if (cfg.ConfigVer < 3) { cfg.MacButtons = true; cfg.MacTitles = true; cfg.ConfigVer = 3; cfg.Save(); }
+            // version 4: se retiran los botones rojo/amarillo/verde sobre otras apps (Windows no los deja reemplazar de forma fiable)
+            if (cfg.ConfigVer < 4) { cfg.MacButtons = false; cfg.MacTitles = false; cfg.ConfigVer = 4; cfg.Save(); }
             appBarMsg = N.RegisterWindowMessage("MacDockAppBarMsg");
             taskbarCreatedMsg = N.RegisterWindowMessage("TaskbarCreated");
             fast = new VsyncTimer(this); fast.Tick += FastTick;
@@ -1952,19 +1953,11 @@ namespace MacDock
             addOpt("Ocultar barra superior con ventanas maximizadas", cfg.BarAutoHide, () => { cfg.BarAutoHide = !cfg.BarAutoHide; cfg.Save(); MenuBar.AutoHideMax = cfg.BarAutoHide; });
             addOpt("Acomodar ventanas arrastrándolas a los bordes (macOS)", cfg.EdgeTiling, () => { cfg.EdgeTiling = !cfg.EdgeTiling; cfg.Save(); if (cfg.EdgeTiling) EdgeTiler.Start(s); else EdgeTiler.Stop(); });
             addOpt("Mover ventanas con su contenido (como Mac)", cfg.LiveDrag, () => { cfg.LiveDrag = !cfg.LiveDrag; cfg.Save(); SetLiveDrag(cfg.LiveDrag); });
-            addOpt("Barra de título estilo Mac (puntos a la izquierda)", cfg.MacTitles, () => { cfg.MacTitles = !cfg.MacTitles; cfg.Save(); global::MacDock.MacButtons.MacTitles = cfg.MacTitles; SetMacButtons(false); SetMacButtons(cfg.MacButtons); });
             addOpt("Transparencia estilo macOS (menús y paneles)", cfg.Glass, () => { cfg.Glass = !cfg.Glass; cfg.Save(); global::MacDock.Glass.Enabled = cfg.Glass; });
             addOpt("Agitar el mouse para agrandar el puntero", cfg.ShakeCursor, () => { cfg.ShakeCursor = !cfg.ShakeCursor; cfg.Save(); SetShake(cfg.ShakeCursor); });
             addOpt("Atajos para acomodar ventanas (Ctrl+Alt+flechas, F, C)", cfg.TileKeys, () => { cfg.TileKeys = !cfg.TileKeys; cfg.Save(); SetTileKeys(cfg.TileKeys); });
             addOpt("Ventanas gelatina al moverlas (ondulación)", cfg.Wobbly, () => { cfg.Wobbly = !cfg.Wobbly; cfg.Save(); global::MacDock.Wobbly.Enabled = cfg.Wobbly; });
             addOpt("Efecto genio al minimizar (como macOS)", cfg.GenieFx, () => { cfg.GenieFx = !cfg.GenieFx; cfg.Save(); global::MacDock.Genie.Enabled = cfg.GenieFx; global::MacDock.Genie.SetGlobal(cfg.GenieFx); });
-            addOpt("Diagnóstico de botones (abrir registro)", false, () =>
-            {
-                string err = Path.Combine(Program.DataDir, "error.log");
-                if (File.Exists(global::MacDock.MacButtons.LogFile)) Process.Start("notepad.exe", "\"" + global::MacDock.MacButtons.LogFile + "\"");
-                else MessageBox.Show("No hay registro de botones: la funcion no se esta ejecutando. Revisa que \"Botones de Mac en todas las ventanas\" este marcado.", "MacDock");
-                if (File.Exists(err)) Process.Start("notepad.exe", "\"" + err + "\"");
-            });
             var desk = new ToolStripMenuItem("Escritorio estilo Mac");
             Action<string, Action> addDesk = (txt, act) => { var mi = new ToolStripMenuItem(txt); mi.Click += (o, e) => { try { act(); } catch (Exception ex) { Program.Log(ex); } }; desk.DropDownItems.Add(mi); };
             if (!global::MacDock.DesktopStyle.Applied)
@@ -2014,7 +2007,6 @@ namespace MacDock
                 });
             }
             addOpt("Menu de Mac al hacer clic derecho en el escritorio", cfg.DesktopMenu, () => { cfg.DesktopMenu = !cfg.DesktopMenu; cfg.Save(); SetDesktopMenu(cfg.DesktopMenu); });
-            addOpt("Botones de Mac en todas las ventanas", cfg.MacButtons, () => { cfg.MacButtons = !cfg.MacButtons; cfg.Save(); SetMacButtons(cfg.MacButtons); });
             addOpt("Abrir Finder en vez del Explorador", cfg.UseFinder, () => { cfg.UseFinder = !cfg.UseFinder; cfg.Save(); });
             addOpt("Spotlight con Alt + Espacio", cfg.SpotlightKey, () =>
             {
