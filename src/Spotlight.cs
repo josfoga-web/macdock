@@ -400,7 +400,7 @@ namespace MacDock
         protected override void OnPaint(PaintEventArgs pe)
         {
             var g = pe.Graphics;
-            g.SmoothingMode = SmoothingMode.AntiAlias; g.TextRenderingHint = TextRenderingHint.ClearTypeGridFit;
+            g.SmoothingMode = SmoothingMode.AntiAlias; g.TextRenderingHint = TextRenderingHint.AntiAlias;
             g.InterpolationMode = InterpolationMode.HighQualityBicubic;
             // lupa
             using (var pen = new Pen(sub, 2.2f * s))

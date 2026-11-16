@@ -202,7 +202,7 @@ namespace MacDock
                 using (var g = Graphics.FromImage(bmp))
                 {
                     g.SmoothingMode = SmoothingMode.AntiAlias;
-                    g.TextRenderingHint = TextRenderingHint.AntiAliasGridFit;
+                    g.TextRenderingHint = TextRenderingHint.AntiAlias;
                     g.PixelOffsetMode = PixelOffsetMode.HighQuality;
                     Color bg = light ? Color.FromArgb(190, 246, 246, 248) : Color.FromArgb(150, 18, 18, 22);
                     Color fg = light ? Color.FromArgb(255, 20, 20, 22) : Color.FromArgb(255, 245, 245, 247);
@@ -695,14 +695,14 @@ namespace MacDock
         }
 
         // ---------- movimiento suave de ventanas (como el acomodo de macOS) ----------
-        static System.Windows.Forms.Timer animTimer;
-        static IntPtr animWnd;
+        // Un hilo propio mueve la ventana en cada refresco de la pantalla (hasta 180 Hz en tu Nitro).
+        [DllImport("dwmapi.dll")] static extern int DwmFlush();
+        static int animGen;
 
         static void AnimateBounds(IntPtr h, int x, int y, int w, int hh)
         {
             N.RECT cur;
             if (!N.GetWindowRect(h, out cur) || SystemInformation.TerminalServerSession) { SetWindowBoundsCompensated(h, x, y, w, hh); return; }
-            // destino ya compensado por los bordes invisibles de Windows 11
             N.RECT ext; int dL = 0, dT = 0, dR = 0, dB = 0;
             if (N.DwmGetWindowAttribute(h, 9, out ext, 16) == 0)
             {
@@ -711,24 +711,26 @@ namespace MacDock
             }
             int tx = x - dL, ty = y - dT, tw = w + dL + dR, th = hh + dT + dB;
             int sx = cur.left, sy = cur.top, sw = cur.right - cur.left, sh = cur.bottom - cur.top;
-            if (animTimer != null) { animTimer.Stop(); animTimer.Dispose(); animTimer = null; }
-            animWnd = h;
-            var start = DateTime.Now; const double dur = 220;
-            animTimer = new System.Windows.Forms.Timer { Interval = 15 };
-            var me = animTimer;
-            me.Tick += (o, e) =>
+            int gen = System.Threading.Interlocked.Increment(ref animGen);
+            var t = new System.Threading.Thread(() =>
             {
-                double t = Math.Min(1, (DateTime.Now - start).TotalMilliseconds / dur);
-                double k = 1 - Math.Pow(1 - t, 3);   // ease-out cubico
-                if (t >= 1)
+                try
                 {
-                    me.Stop(); me.Dispose(); if (animTimer == me) animTimer = null;
-                    N.SetWindowPos(h, IntPtr.Zero, tx, ty, tw, th, 0x0004 | 0x0010);
-                    return;
+                    var clock = Stopwatch.StartNew(); const double dur = 0.26;
+                    while (gen == animGen)
+                    {
+                        double p = clock.Elapsed.TotalSeconds / dur;
+                        if (p >= 1) break;
+                        float k = Ease.OutCubic(p);
+                        N.SetWindowPos(h, IntPtr.Zero, (int)Math.Round(sx + (tx - sx) * k), (int)Math.Round(sy + (ty - sy) * k),
+                            (int)Math.Round(sw + (tw - sw) * k), (int)Math.Round(sh + (th - sh) * k), 0x0004 | 0x0010 | 0x0100 | 0x0200);
+                        if (DwmFlush() != 0) System.Threading.Thread.Sleep(6);
+                    }
+                    if (gen == animGen) N.SetWindowPos(h, IntPtr.Zero, tx, ty, tw, th, 0x0004 | 0x0010);
                 }
-                N.SetWindowPos(h, IntPtr.Zero, (int)(sx + (tx - sx) * k), (int)(sy + (ty - sy) * k), (int)(sw + (tw - sw) * k), (int)(sh + (th - sh) * k), 0x0004 | 0x0010 | 0x0100);
-            };
-            me.Start();
+                catch (Exception ex) { Program.Log(ex); }
+            }) { IsBackground = true, Name = "MacDockTile" };
+            t.Start();
         }
 
         // ---------- reservar el espacio arriba (como Mac) ----------
@@ -1003,7 +1005,7 @@ namespace MacDock
         {
             var g = pe.Graphics;
             g.SmoothingMode = SmoothingMode.AntiAlias;
-            g.TextRenderingHint = TextRenderingHint.ClearTypeGridFit;
+            g.TextRenderingHint = TextRenderingHint.AntiAlias;
 
             Color cardBg = light ? Color.FromArgb(250, 250, 253) : Color.FromArgb(44, 44, 52);
             Color cardBorder = light ? Color.FromArgb(22, 0, 0, 0) : Color.FromArgb(32, 255, 255, 255);

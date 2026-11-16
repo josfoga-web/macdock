@@ -401,7 +401,7 @@ namespace MacDock
             var g = pe.Graphics;
             g.SmoothingMode = SmoothingMode.AntiAlias;
             g.InterpolationMode = InterpolationMode.HighQualityBicubic;
-            g.TextRenderingHint = TextRenderingHint.ClearTypeGridFit;
+            g.TextRenderingHint = TextRenderingHint.AntiAlias;
             Color fg = light ? Color.FromArgb(28, 28, 30) : Color.FromArgb(236, 236, 240);
             Color sub = light ? Color.FromArgb(110, 110, 118) : Color.FromArgb(150, 150, 160);
 

@@ -684,7 +684,7 @@ namespace MacDock
 
         void PaintSide(object o, PaintEventArgs e)
         {
-            var g = e.Graphics; g.SmoothingMode = SmoothingMode.AntiAlias; g.TextRenderingHint = TextRenderingHint.ClearTypeGridFit;
+            var g = e.Graphics; g.SmoothingMode = SmoothingMode.AntiAlias; g.TextRenderingHint = TextRenderingHint.AntiAlias;
             g.InterpolationMode = InterpolationMode.HighQualityBicubic;
             float y = 12 * s, rowH = 28 * s;
             using (var hf = new Font(UiFont.Semi, 8.5f)) using (var hb = new SolidBrush(sub)) using (var fb = new SolidBrush(fg))
@@ -721,7 +721,7 @@ namespace MacDock
         // ---------------- barra superior ----------------
         void PaintTop(object o, PaintEventArgs e)
         {
-            var g = e.Graphics; g.SmoothingMode = SmoothingMode.AntiAlias; g.TextRenderingHint = TextRenderingHint.ClearTypeGridFit;
+            var g = e.Graphics; g.SmoothingMode = SmoothingMode.AntiAlias; g.TextRenderingHint = TextRenderingHint.AntiAlias;
             float cy = topBar.Height / 2f;
             { var lp = LightsPos; TrafficLights.Draw(g, lp.X, lp.Y, s, lightsActive, lightsHover >= 0, light); }
             float x = sideBar.Width + 14 * s;
@@ -786,7 +786,7 @@ namespace MacDock
         // ---------------- barra de ruta ----------------
         void PaintPath(object o, PaintEventArgs e)
         {
-            var g = e.Graphics; g.TextRenderingHint = TextRenderingHint.ClearTypeGridFit;
+            var g = e.Graphics; g.TextRenderingHint = TextRenderingHint.AntiAlias;
             using (var pen = new Pen(line)) g.DrawLine(pen, 0, 0, pathBar.Width, 0);
             crumbs.Clear();
             var parts = new List<string>();

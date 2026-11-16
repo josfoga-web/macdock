@@ -23,7 +23,8 @@ namespace MacDock
         public List<IntPtr> Windows = new List<IntPtr>();
         public DateTime LaunchAt = DateTime.MinValue;
         public int Badge;
-        public float X, W, Scale = 1f, Cx;
+        public float X, W, Scale = 1f, Cx, Life = 1f;
+        public DateTime BornAt = DateTime.MinValue, DyingAt = DateTime.MinValue;
         public bool Running { get { return Windows.Count > 0; } }
     }
 
@@ -207,11 +208,17 @@ namespace MacDock
         List<DockItem> all = new List<DockItem>();
         Dictionary<string, Bitmap> iconCache = new Dictionary<string, Bitmap>(StringComparer.OrdinalIgnoreCase);
 
-        System.Windows.Forms.Timer fast = new System.Windows.Forms.Timer();
+        VsyncTimer fast;
+        Stopwatch frameClock = Stopwatch.StartNew();
+        double lastFrameT;
+        float slideFrom; double slideT0, slideDur = 0.3;
+        bool scannedOnce;
+        const double BornDur = 0.32, DieDur = 0.28;
+        Font labelFont; float labelFontScale;
         System.Windows.Forms.Timer slow = new System.Windows.Forms.Timer();
         FileSystemWatcher watcher;
 
-        Bitmap canvas;
+        LayeredCanvas canvas;
         int winX, winY, W, H;
         float mag = 0f, lastMx = -1;
         int hoverIdx = -1;
@@ -865,7 +872,7 @@ namespace MacDock
             cfg = new Config(Path.Combine(Program.DataDir, "config.ini"));
             appBarMsg = N.RegisterWindowMessage("MacDockAppBarMsg");
             taskbarCreatedMsg = N.RegisterWindowMessage("TaskbarCreated");
-            fast.Interval = 15; fast.Tick += FastTick;
+            fast = new VsyncTimer(this); fast.Tick += FastTick;
             slow.Interval = 1000; slow.Tick += SlowTick;
             edge.Interval = 120; edge.Tick += EdgeTick;
         }
@@ -935,6 +942,24 @@ namespace MacDock
             return b;
         }
 
+        // icono de un acceso directo; se regenera solo si el archivo cambio
+        Bitmap PinnedIcon(DockItem it)
+        {
+            if (it.IsExplorer && cfg.MacIcons)
+            {
+                Bitmap e; if (!iconCache.TryGetValue("::explorer", out e)) { e = MacIcon.Explorer(IconPx); iconCache["::explorer"] = e; }
+                return e;
+            }
+            string key = it.Lnk;
+            try { key += "|" + File.GetLastWriteTimeUtc(it.Lnk).Ticks; } catch { }
+            Bitmap b;
+            if (iconCache.TryGetValue(key, out b)) return b;
+            b = Shell.GetIcon(it.Lnk, IconPx);
+            if (cfg.MacIcons && b != null) b = MacIcon.Tile(b, IconPx);
+            iconCache[key] = b;
+            return b;
+        }
+
         Bitmap FolderIcon(string dir, int glyph) { return cfg.MacIcons ? MacIcon.Folder(IconPx, glyph) : Shell.GetIcon(dir, IconPx); }
 
         Bitmap startIcon, macShadow;
@@ -942,8 +967,9 @@ namespace MacDock
         // vuelve a generar todos los iconos (al activar o desactivar los iconos estilo Mac)
         void RefreshIcons()
         {
-            iconCache.Clear(); startIcon = null; macShadow = null;
-            foreach (var it in pinned) if (it.Lnk != null) it.Icon = IconFor(it.Lnk);
+            iconCache.Clear(); IconSizes.Clear(); startIcon = null; macShadow = null; trashMacEmpty = trashMacFull = null;
+            foreach (var it in pinned) if (it.Lnk != null) it.Icon = PinnedIcon(it);
+            if (trashItem != null) trashItem.Icon = TrashIcon() ?? trashItem.Icon;
             foreach (var it in transient) if (!string.IsNullOrEmpty(it.Target)) it.Icon = IconFor(it.Target);
             if (downloadsItem != null) downloadsItem.Icon = FolderIcon(downloadsItem.Target, 1);
             if (stackItem != null) stackItem.Icon = FolderIcon(stackItem.Target, 2);
@@ -961,7 +987,6 @@ namespace MacDock
             files = files.OrderBy(f => { int i = order.IndexOf(Path.GetFileName(f)); return i < 0 ? 10000 : i; })
                          .ThenBy(f => Path.GetFileName(f)).ToList();
 
-            foreach (var p in pinned) if (p.Lnk != null) iconCache.Remove(p.Lnk);
             pinned.Clear();
             foreach (var f in files)
             {
@@ -971,7 +996,7 @@ namespace MacDock
                 it.IsExplorer = it.Target.ToLowerInvariant().EndsWith("\\explorer.exe") ||
                                 (it.Target == "" && (n.Contains("explorer") || n.Contains("explorador")));
                 if (it.IsExplorer) it.Name = "Explorador de archivos";
-                it.Icon = IconFor(f);
+                it.Icon = PinnedIcon(it);
                 pinned.Add(it);
             }
             if (first) SaveOrder();
@@ -991,7 +1016,16 @@ namespace MacDock
             Compose();
         }
 
-        Bitmap TrashIcon() { return Shell.GetIcon("::{645FF040-5081-101B-9F08-00AA002F954E}", IconPx); }
+        Bitmap trashMacEmpty, trashMacFull;
+        Bitmap TrashIcon()
+        {
+            if (cfg.MacIcons)
+            {
+                if (trashFull) return trashMacFull ?? (trashMacFull = MacIcon.Trash(IconPx, true));
+                return trashMacEmpty ?? (trashMacEmpty = MacIcon.Trash(IconPx, false));
+            }
+            return Shell.GetIcon("::{645FF040-5081-101B-9F08-00AA002F954E}", IconPx);
+        }
 
         void ImportTaskbarPins()
         {
@@ -1109,18 +1143,26 @@ namespace MacDock
                 if (it == null)
                 {
                     it = transient.FirstOrDefault(t => string.Equals(t.Target, path, StringComparison.OrdinalIgnoreCase));
+                    if (it != null && it.DyingAt != DateTime.MinValue) { it.DyingAt = DateTime.MinValue; it.BornAt = DateTime.Now; }
                     if (it == null)
                     {
                         string name = Path.GetFileNameWithoutExtension(path);
                         try { var vi = FileVersionInfo.GetVersionInfo(path); if (!string.IsNullOrEmpty(vi.FileDescription)) name = vi.FileDescription; } catch { }
                         it = new DockItem { Kind = Kind.App, Target = path, Name = name, Icon = IconFor(path) };
+                        if (scannedOnce) it.BornAt = DateTime.Now;   // aparece creciendo, como en macOS
                         transient.Add(it);
                     }
                 }
                 it.Windows.Add(kv.Key);
             }
-            transient.RemoveAll(t => t.Windows.Count == 0);
+            // las apps que se cierran se encogen antes de salir del dock
+            bool anim = false; var nowD = DateTime.Now;
+            foreach (var t in transient)
+                if (t.Windows.Count == 0 && t.DyingAt == DateTime.MinValue) { t.DyingAt = scannedOnce ? nowD : nowD.AddSeconds(-DieDur); t.BornAt = DateTime.MinValue; anim = true; }
+            transient.RemoveAll(t => t.DyingAt != DateTime.MinValue && (nowD - t.DyingAt).TotalSeconds >= DieDur);
+            if (!scannedOnce) scannedOnce = true;
             Compose();
+            if (anim || AnyTransition()) StartAnim();
 
             bool changed = all.Count != beforeCount;
             if (!changed) for (int i = 0; i < all.Count; i++) if ((all[i].Windows.Count > 0) != (before[i] > 0)) { changed = true; break; }
@@ -1164,7 +1206,31 @@ namespace MacDock
             catch (Exception ex) { Program.Log(ex); }
         }
 
-        void StartAnim() { if (!fast.Enabled) fast.Start(); idleSince = DateTime.MaxValue; }
+        void StartAnim()
+        {
+            if (!fast.Enabled) { lastFrameT = frameClock.Elapsed.TotalSeconds - 1.0 / 120; fast.Start(); }
+            idleSince = DateTime.MaxValue;
+        }
+
+        float LifeOf(DockItem it)
+        {
+            float a = 1f; var now = DateTime.Now;
+            if (it.BornAt != DateTime.MinValue)
+            {
+                double t = (now - it.BornAt).TotalSeconds;
+                if (t >= BornDur) it.BornAt = DateTime.MinValue; else a = Ease.OutCubic(t / BornDur);
+            }
+            if (it.DyingAt != DateTime.MinValue) a *= 1f - Ease.InOutCubic((now - it.DyingAt).TotalSeconds / DieDur);
+            return a;
+        }
+
+        bool AnyTransition()
+        {
+            var now = DateTime.Now;
+            foreach (var it in all)
+                if (it.BornAt != DateTime.MinValue || (it.DyingAt != DateTime.MinValue && (now - it.DyingAt).TotalSeconds < DieDur)) return true;
+            return false;
+        }
 
         bool AnyBouncing()
         {
@@ -1179,11 +1245,15 @@ namespace MacDock
         void FastTick(object sender, EventArgs e)
         {
             if (hiddenFull) { ClosePreview(); fast.Stop(); return; }
+            double nowT = frameClock.Elapsed.TotalSeconds;
+            float dt = (float)Math.Max(0.001, Math.Min(0.05, nowT - lastFrameT)); lastFrameT = nowT;
             bool sliding = slide != slideTarget;
             if (sliding)
             {
-                slide += (slideTarget - slide) * 0.28f;
-                if (Math.Abs(slideTarget - slide) < 0.02f) slide = slideTarget;
+                // ocultar: entra y sale suave; mostrar: arranca rapido y frena (como macOS)
+                double p = (nowT - slideT0) / slideDur;
+                float e2 = slideTarget > slideFrom ? Ease.InOutCubic(p) : Ease.OutCubic(p);
+                slide = p >= 1 ? slideTarget : slideFrom + (slideTarget - slideFrom) * e2;
                 if (slide >= 1f && slideTarget >= 1f)
                 {
                     hiddenFull = true; mag = 0f; hoverIdx = -1; ClosePreview(); fast.Stop();
@@ -1197,8 +1267,8 @@ namespace MacDock
             bool inside = mx >= left - 2 && mx <= right + 2 && my >= topZone && my <= H + 2;
             if (dragging) inside = true;
             float target = inside ? 1f : 0f;
-            mag += (target - mag) * 0.22f;
-            if (Math.Abs(target - mag) < 0.01f) mag = target;
+            mag = Ease.Approach(mag, target, dt, inside ? 0.055f : 0.075f);
+            if (Math.Abs(target - mag) < 0.003f) mag = target;
             if (inside) lastMx = mx;
             hoverIdx = inside ? HitIndex(mx) : -1;
             if (hoverIdx != prevHoverIdx)
@@ -1208,12 +1278,12 @@ namespace MacDock
                 if (hoverIdx < 0 && previewPopup != null && !previewPopup.IsMouseInsideOrBridge(c)) ClosePreview();
             }
             UpdatePreview();
-            bool bouncing = AnyBouncing();
+            bool bouncing = AnyBouncing() || AnyTransition();
             bool same = c == lastCursor && mag == lastMag && !bouncing && !dragging && !sliding;
             lastCursor = c; lastMag = mag;
             if (same)
             {
-                if (++stillFrames > 40) { fast.Stop(); stillFrames = 0; idleSince = DateTime.Now; }
+                if (++stillFrames > 90) { fast.Stop(); stillFrames = 0; idleSince = DateTime.Now; }
                 return;
             }
             stillFrames = 0;
@@ -1242,10 +1312,10 @@ namespace MacDock
 
         void DoLayout(float mx, float m)
         {
-            float restTotal = 0; foreach (var it in all) restTotal += Slot(it);
+            float restTotal = 0; foreach (var it in all) { it.Life = LifeOf(it); restTotal += Slot(it) * it.Life; }
             float restStart = (W - restTotal) / 2f;
             float cx = restStart;
-            foreach (var it in all) { float sl = Slot(it); it.Cx = cx + sl / 2f; cx += sl; }
+            foreach (var it in all) { float sl = Slot(it) * it.Life; it.Cx = cx + sl / 2f; cx += sl; }
             float total = 0;
             float spread = Ic * 2.7f;
             foreach (var it in all)
@@ -1256,7 +1326,7 @@ namespace MacDock
                     float d = Math.Abs(mx - it.Cx) / spread;
                     if (d < 1f) it.Scale = 1f + (MaxMag - 1f) * m * (float)((Math.Cos(Math.PI * d) + 1) / 2);
                 }
-                it.W = Slot(it) + (it.Kind == Kind.Separator ? 0 : Ic * (it.Scale - 1f));
+                it.W = (Slot(it) + (it.Kind == Kind.Separator ? 0 : Ic * (it.Scale - 1f))) * it.Life;
                 total += it.W;
             }
             float t = restTotal > 0 ? Math.Max(0f, Math.Min(1f, (mx - restStart) / restTotal)) : 0.5f;
@@ -1268,7 +1338,7 @@ namespace MacDock
         int HitIndex(float mx)
         {
             for (int i = 0; i < all.Count; i++)
-                if (mx >= all[i].X && mx < all[i].X + all[i].W) return all[i].Kind == Kind.Separator ? -1 : i;
+                if (mx >= all[i].X && mx < all[i].X + all[i].W) return all[i].Kind == Kind.Separator || all[i].DyingAt != DateTime.MinValue ? -1 : i;
             return -1;
         }
 
@@ -1294,15 +1364,16 @@ namespace MacDock
         void Render()
         {
             if (W <= 0 || H <= 0 || all.Count == 0 || hiddenFull) return;
-            if (canvas == null) canvas = new Bitmap(W, H, PixelFormat.Format32bppArgb);
-            using (var g = Graphics.FromImage(canvas))
+            if (canvas == null) canvas = new LayeredCanvas(W, H);
+            using (var g = Graphics.FromImage(canvas.Bitmap))
             {
                 g.Clear(Color.Transparent);
                 g.SmoothingMode = SmoothingMode.AntiAlias;
-                g.InterpolationMode = InterpolationMode.HighQualityBicubic;
+                // los iconos ya vienen reducidos al tamano justo: basta un filtro bilineal (mucho mas rapido)
+                g.InterpolationMode = InterpolationMode.HighQualityBilinear;
                 g.PixelOffsetMode = PixelOffsetMode.HighQuality;
-                g.TextRenderingHint = TextRenderingHint.AntiAliasGridFit;
-                g.CompositingQuality = CompositingQuality.HighQuality;
+                g.TextRenderingHint = TextRenderingHint.AntiAlias;
+                g.CompositingQuality = CompositingQuality.AssumeLinear;
 
                 float left = all[0].X - PadX, right = all[all.Count - 1].X + all[all.Count - 1].W + PadX;
                 float top = BarTop, bottom = H - BottomM;
@@ -1326,7 +1397,8 @@ namespace MacDock
                             g.DrawLine(pen, it.X + it.W / 2, top + PadY + 6 * s, it.X + it.W / 2, bottom - PadY - 4 * s);
                         continue;
                     }
-                    float size = Ic * it.Scale;
+                    if (it.Life < 0.02f) continue;
+                    float size = Ic * it.Scale * it.Life;
                     float ix = it.X + (it.W - size) / 2f;
                     float iy = top + PadY + Ic - size - Bounce(it);
                     var r = new RectangleF(ix, iy, size, size);
@@ -1334,13 +1406,14 @@ namespace MacDock
                     else if (it.Kind == Kind.Clock) DrawClock(g, r);
                     else if (it.Icon != null)
                     {
-                        if (it == pressItem && !dragging)
+                        float fade = it.Life < 1f ? it.Life : 1f, dark = it == pressItem && !dragging ? 0.62f : 1f;
+                        if (fade < 1f || dark < 1f)
                             using (var ia = new ImageAttributes())
                             {
-                                ia.SetColorMatrix(new ColorMatrix(new[] { new float[] { 0.62f, 0, 0, 0, 0 }, new float[] { 0, 0.62f, 0, 0, 0 }, new float[] { 0, 0, 0.62f, 0, 0 }, new float[] { 0, 0, 0, 1, 0 }, new float[] { 0, 0, 0, 0, 1 } }));
-                                g.DrawImage(it.Icon, new[] { new PointF(r.X, r.Y), new PointF(r.Right, r.Y), new PointF(r.X, r.Bottom) }, new RectangleF(0, 0, it.Icon.Width, it.Icon.Height), GraphicsUnit.Pixel, ia);
+                                ia.SetColorMatrix(new ColorMatrix(new[] { new float[] { dark, 0, 0, 0, 0 }, new float[] { 0, dark, 0, 0, 0 }, new float[] { 0, 0, dark, 0, 0 }, new float[] { 0, 0, 0, fade, 0 }, new float[] { 0, 0, 0, 0, 1 } }));
+                                IconSizes.Draw(g, it.Icon, r, ia);
                             }
-                        else g.DrawImage(it.Icon, r);
+                        else IconSizes.Draw(g, it.Icon, r);
                     }
                     else DrawPlaceholder(g, r, it.Name);
                     if (it == hover) hoverTop = iy; if (it.Badge > 0) DrawBadge(g, r, it.Badge);
@@ -1357,7 +1430,8 @@ namespace MacDock
                 {
                     string label = hover.Name;
                     if (hover.Kind == Kind.Clock) label = DateTime.Now.ToString("dddd d 'de' MMMM, HH:mm");
-                    using (var font = new Font(UiFont.Reg, 12.5f * s, FontStyle.Regular, GraphicsUnit.Pixel))
+                    if (labelFont == null || labelFontScale != s) { if (labelFont != null) labelFont.Dispose(); labelFont = new Font(UiFont.Reg, 12.5f * s, FontStyle.Regular, GraphicsUnit.Pixel); labelFontScale = s; }
+                    var font = labelFont;
                     {
                         var ts = g.MeasureString(label, font);
                         float lw = ts.Width + 18 * s, lh = ts.Height + 8 * s;
@@ -1397,7 +1471,7 @@ namespace MacDock
                         startIcon = MacIcon.Tile(raw, 256);
                     }
                 }
-                g.DrawImage(startIcon, r); return;
+                IconSizes.Draw(g, startIcon, r); return;
             }
             using (var p = Round(r, r.Width * 0.225f))
             using (var b = new LinearGradientBrush(r, Color.FromArgb(77, 163, 255), Color.FromArgb(16, 92, 214), 90f))
@@ -1417,7 +1491,7 @@ namespace MacDock
             {
                 // misma forma, tamano y sombra que los demas iconos
                 if (macShadow == null) macShadow = MacIcon.ShadowOnly(256);
-                g.DrawImage(macShadow, r);
+                IconSizes.Draw(g, macShadow, r);
                 float bw = r.Width * MacIcon.BodyRatio;
                 r = new RectangleF(r.X + (r.Width - bw) / 2, r.Y + (r.Height - bw) / 2 - r.Height * MacIcon.LiftRatio, bw, bw);
             }
@@ -1471,25 +1545,7 @@ namespace MacDock
 
         void Push()
         {
-            IntPtr screenDc = N.GetDC(IntPtr.Zero);
-            IntPtr memDc = N.CreateCompatibleDC(screenDc);
-            IntPtr hBmp = IntPtr.Zero, old = IntPtr.Zero;
-            try
-            {
-                hBmp = canvas.GetHbitmap(Color.FromArgb(0));
-                old = N.SelectObject(memDc, hBmp);
-                var size = new N.SIZE { cx = W, cy = H };
-                var src = new N.POINT();
-                var dst = new N.POINT { x = winX, y = winY + (int)SlidePx };
-                var blend = new N.BLENDFUNCTION { BlendOp = 0, BlendFlags = 0, SourceConstantAlpha = 255, AlphaFormat = 1 };
-                N.UpdateLayeredWindow(Handle, screenDc, ref dst, ref size, memDc, ref src, 0, ref blend, 2);
-            }
-            finally
-            {
-                N.ReleaseDC(IntPtr.Zero, screenDc);
-                if (hBmp != IntPtr.Zero) { N.SelectObject(memDc, old); N.DeleteObject(hBmp); }
-                N.DeleteDC(memDc);
-            }
+            canvas.Push(Handle, winX, winY + (int)Math.Round(SlidePx));
         }
 
         // ---------- mouse ----------
@@ -1941,7 +1997,8 @@ namespace MacDock
             peeking = false;
             ClosePreview();
             if (hiddenFull || slideTarget == 1f) return;
-            slideTarget = 1f; StartAnim();
+            StartAnim();
+            slideFrom = slide; slideT0 = frameClock.Elapsed.TotalSeconds; slideDur = 0.34; slideTarget = 1f;
         }
 
         void ShowDock()
@@ -1952,6 +2009,7 @@ namespace MacDock
                 N.ShowWindow(Handle, 8);
                 N.SetWindowPos(Handle, new IntPtr(-1), 0, 0, 0, 0, 0x0001 | 0x0002 | 0x0010);
             }
+            if (slideTarget != 0f) { StartAnim(); slideFrom = slide; slideT0 = frameClock.Elapsed.TotalSeconds; slideDur = 0.28; }
             slideTarget = 0f;
             DoLayout(lastMx, mag);
             StartAnim();
@@ -2064,7 +2122,7 @@ namespace MacDock
         {
             if (restored) return;
             restored = true;
-            try { slow.Stop(); fast.Stop(); edge.Stop(); } catch { }
+            try { slow.Stop(); fast.Stop(); fast.Close(); edge.Stop(); } catch { }
             if (loweredRefresh) RestoreRefresh();
             try { nap.WakeAll(); } catch { }
             try { StopMacFeatures(); } catch { }
@@ -2230,7 +2288,7 @@ namespace MacDock
         {
             var g = pe.Graphics;
             g.SmoothingMode = SmoothingMode.AntiAlias;
-            g.TextRenderingHint = TextRenderingHint.ClearTypeGridFit;
+            g.TextRenderingHint = TextRenderingHint.AntiAlias;
             g.InterpolationMode = InterpolationMode.HighQualityBicubic;
 
             Color fg = light ? Color.FromArgb(24, 24, 28) : Color.FromArgb(238, 238, 244);

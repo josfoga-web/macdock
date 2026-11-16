@@ -192,7 +192,7 @@ namespace MacDock
             var mi = e.Item as ToolStripMenuItem;
             bool isShortcut = mi != null && !string.IsNullOrEmpty(mi.ShortcutKeyDisplayString) && e.Text == mi.ShortcutKeyDisplayString;
             e.TextColor = !e.Item.Enabled ? dim : (e.Item.Selected ? (isShortcut ? Color.FromArgb(225, 236, 255) : Color.White) : (isShortcut ? dim : fg));
-            e.Graphics.TextRenderingHint = TextRenderingHint.AntiAliasGridFit;
+            e.Graphics.TextRenderingHint = TextRenderingHint.AntiAlias;
             base.OnRenderItemText(e);
         }
 

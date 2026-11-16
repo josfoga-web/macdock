@@ -180,9 +180,15 @@ namespace MacDock
 
     static class UiFont
     {
-        static string Pick(string want, string fallback) { try { using (var f = new FontFamily(want)) return want; } catch { return fallback; } }
-        public static readonly string Reg = Pick("Inter", "Segoe UI");
-        public static readonly string Semi = Pick("Inter SemiBold", "Segoe UI Semibold");
+        // Usa la primera fuente instalada de la lista. SF Pro (la de macOS) solo se usa si tu la instalaste;
+        // MacDock no la incluye porque su licencia solo permite usarla en equipos Apple.
+        static string Pick(params string[] names)
+        {
+            foreach (var n in names) try { using (var f = new FontFamily(n)) if (f.Name.Equals(n, StringComparison.OrdinalIgnoreCase)) return n; } catch { }
+            return names[names.Length - 1];
+        }
+        public static readonly string Reg = Pick("SF Pro Text", "SF Pro Display", "SF Pro", "Inter", "Segoe UI");
+        public static readonly string Semi = Pick("SF Pro Text Semibold", "SF Pro Display Semibold", "SF Pro Semibold", "Inter SemiBold", "Segoe UI Semibold");
     }
 
     static class Shell

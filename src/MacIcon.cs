@@ -83,6 +83,95 @@ namespace MacDock
             catch { return src; }
         }
 
+        // Explorador de archivos: placa azul con una carpeta blanca
+        public static Bitmap Explorer(int px)
+        {
+            using (var raw = new Bitmap(256, 256, PixelFormat.Format32bppArgb))
+            {
+                using (var g = Hq(Graphics.FromImage(raw)))
+                {
+                    using (var b = new LinearGradientBrush(new Rectangle(0, -1, 256, 258), Color.FromArgb(104, 196, 255), Color.FromArgb(22, 110, 236), 90f)) g.FillRectangle(b, 0, 0, 256, 256);
+                    using (var back = Rr(new RectangleF(52, 74, 152, 112), 14))
+                    using (var tab = Rr(new RectangleF(52, 64, 62, 26), 9))
+                    using (var front = Rr(new RectangleF(52, 94, 152, 100), 14))
+                    {
+                        using (var sh = new SolidBrush(Color.FromArgb(55, 0, 40, 110)))
+                        using (var m = new Matrix()) { var f2 = (GraphicsPath)front.Clone(); m.Translate(0, 6); f2.Transform(m); g.FillPath(sh, f2); f2.Dispose(); }
+                        using (var b = new SolidBrush(Color.FromArgb(205, 232, 255))) { g.FillPath(b, back); g.FillPath(b, tab); }
+                        using (var b = new LinearGradientBrush(new RectangleF(52, 93, 152, 102), Color.White, Color.FromArgb(232, 243, 255), 90f)) g.FillPath(b, front);
+                    }
+                }
+                return Tile(raw, px);
+            }
+        }
+
+        // Papelera translucida (vacia o con papeles)
+        public static Bitmap Trash(int px, bool full)
+        {
+            var bmp = new Bitmap(px, px, PixelFormat.Format32bppArgb);
+            using (var g = Hq(Graphics.FromImage(bmp)))
+            {
+                float u = px / 100f;
+                float topY = 17 * u, botY = 92 * u, tw = 66 * u, bw = 54 * u, cx = 50 * u;
+                var body = new GraphicsPath();
+                body.AddLines(new[] { new PointF(cx - tw / 2, topY + 4 * u), new PointF(cx + tw / 2, topY + 4 * u), new PointF(cx + bw / 2, botY - 4 * u) });
+                body.AddArc(cx + bw / 2 - 8 * u, botY - 8 * u, 8 * u, 8 * u, 0, 90);
+                body.AddArc(cx - bw / 2, botY - 8 * u, 8 * u, 8 * u, 90, 90);
+                body.CloseFigure();
+                // sombra
+                using (var sh = new Bitmap(px, px, PixelFormat.Format32bppArgb))
+                {
+                    using (var gs = Hq(Graphics.FromImage(sh))) using (var b = new SolidBrush(Color.FromArgb(90, 0, 0, 0))) gs.FillEllipse(b, cx - bw / 2, botY - 4 * u, bw, 8 * u);
+                    Blur(sh, Math.Max(2, (int)(2.5f * u)));
+                    g.DrawImage(sh, 0, 0);
+                }
+                if (full)
+                {
+                    using (var pb = new SolidBrush(Color.FromArgb(250, 250, 252)))
+                    using (var pp = new Pen(Color.FromArgb(70, 0, 0, 0), Math.Max(1f, 0.6f * u)))
+                    {
+                        var blobs = new[] { new RectangleF(cx - 26 * u, topY - 9 * u, 24 * u, 20 * u), new RectangleF(cx - 6 * u, topY - 13 * u, 26 * u, 24 * u), new RectangleF(cx + 8 * u, topY - 6 * u, 20 * u, 17 * u) };
+                        foreach (var r in blobs) { using (var bp = Crumple(r)) { g.FillPath(pb, bp); g.DrawPath(pp, bp); } }
+                    }
+                }
+                // interior oscuro
+                using (var b = new SolidBrush(Color.FromArgb(60, 30, 30, 36))) g.FillEllipse(b, cx - tw / 2 + 2 * u, topY, tw - 4 * u, 9 * u);
+                // cuerpo esmerilado
+                using (var b = new LinearGradientBrush(new RectangleF(cx - tw / 2, 0, tw, px), Color.FromArgb(215, 214, 218, 226), Color.FromArgb(215, 246, 247, 250), 0f))
+                {
+                    var cb = new ColorBlend { Positions = new[] { 0f, 0.35f, 0.65f, 1f }, Colors = new[] { Color.FromArgb(225, 196, 198, 208), Color.FromArgb(215, 250, 250, 252), Color.FromArgb(215, 236, 237, 242), Color.FromArgb(225, 188, 190, 200) } };
+                    b.InterpolationColors = cb; g.FillPath(b, body);
+                }
+                // nervaduras verticales
+                using (var pen = new Pen(Color.FromArgb(70, 90, 94, 108), Math.Max(1f, 1.1f * u)))
+                    for (int i = 1; i < 8; i++)
+                    {
+                        float t = i / 8f;
+                        g.DrawLine(pen, cx - tw / 2 + tw * t, topY + 9 * u, cx - bw / 2 + bw * t, botY - 5 * u);
+                    }
+                using (var pen = new Pen(Color.FromArgb(120, 110, 112, 124), Math.Max(1f, 0.8f * u))) g.DrawPath(pen, body);
+                // aro superior
+                using (var rim = Rr(new RectangleF(cx - tw / 2 - 2 * u, topY - 1 * u, tw + 4 * u, 9 * u), 4.5f * u))
+                {
+                    using (var b = new LinearGradientBrush(new RectangleF(0, topY - 2 * u, px, 11 * u), Color.FromArgb(250, 252, 252, 254), Color.FromArgb(240, 200, 202, 212), 90f)) g.FillPath(b, rim);
+                    using (var pen = new Pen(Color.FromArgb(120, 110, 112, 124), Math.Max(1f, 0.8f * u))) g.DrawPath(pen, rim);
+                }
+                body.Dispose();
+            }
+            return bmp;
+        }
+
+        static GraphicsPath Crumple(RectangleF r)
+        {
+            var pts = new PointF[9]; var rnd = new Random((int)(r.X * 7 + r.Y * 13));
+            for (int i = 0; i < pts.Length; i++)
+            {
+                double a = Math.PI * 2 * i / pts.Length, k = 0.78 + rnd.NextDouble() * 0.22;
+                pts[i] = new PointF(r.X + r.Width / 2 + (float)(Math.Cos(a) * r.Width / 2 * k), r.Y + r.Height / 2 + (float)(Math.Sin(a) * r.Height / 2 * k));
+            }
+            var p = new GraphicsPath(); p.AddClosedCurve(pts, 0.35f); return p;
+        }
+
         // Carpeta azul estilo Mac con un glifo grabado (0 = ninguno, 1 = descargas, 2 = escritorio)
         public static Bitmap Folder(int px, int glyph)
         {
